@@ -1,0 +1,939 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MAX_AI Scanner</title>
+    <style>
+        :root {
+            --bg-primary: #0d1117;
+            --bg-secondary: #161b22;
+            --bg-tertiary: #21262d;
+            --border-color: #30363d;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent-green: #238636;
+            --accent-green-light: #2ea043;
+            --accent-red: #da3633;
+            --accent-yellow: #d29922;
+            --accent-blue: #58a6ff;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+
+        /* Header */
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            font-size: 20px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .header h1 span {
+            color: var(--accent-green-light);
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent-green);
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.disconnected {
+            background: var(--accent-red);
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Main Layout */
+        .main-container {
+            display: grid;
+            grid-template-columns: 1fr 320px;
+            gap: 0;
+            height: calc(100vh - 53px);
+        }
+
+        /* Scanner Panel */
+        .scanner-panel {
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--border-color);
+        }
+
+        /* Profile Tabs */
+        .profile-tabs {
+            display: flex;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border-color);
+            overflow-x: auto;
+        }
+
+        .profile-tab {
+            padding: 12px 20px;
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+        .profile-tab:hover {
+            color: var(--text-primary);
+            background: var(--bg-tertiary);
+        }
+
+        .profile-tab.active {
+            color: var(--text-primary);
+            border-bottom-color: var(--accent-green);
+        }
+
+        /* Scanner Table */
+        .scanner-content {
+            flex: 1;
+            overflow: auto;
+        }
+
+        .scanner-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 13px;
+        }
+
+        .scanner-table th {
+            position: sticky;
+            top: 0;
+            background: var(--bg-secondary);
+            padding: 10px 12px;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-secondary);
+            border-bottom: 1px solid var(--border-color);
+            white-space: nowrap;
+        }
+
+        .scanner-table th.sortable {
+            cursor: pointer;
+        }
+
+        .scanner-table th.sortable:hover {
+            color: var(--text-primary);
+        }
+
+        .scanner-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .scanner-table tr:hover {
+            background: var(--bg-secondary);
+        }
+
+        .symbol-cell {
+            font-weight: 600;
+            color: var(--accent-blue);
+        }
+
+        .price-cell {
+            font-family: 'SF Mono', Monaco, monospace;
+        }
+
+        .change-positive {
+            color: var(--accent-green-light);
+        }
+
+        .change-negative {
+            color: var(--accent-red);
+        }
+
+        .ai-score {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .ai-score.high {
+            background: rgba(35, 134, 54, 0.3);
+            color: var(--accent-green-light);
+        }
+
+        .ai-score.medium {
+            background: rgba(210, 153, 34, 0.3);
+            color: var(--accent-yellow);
+        }
+
+        .ai-score.low {
+            background: rgba(139, 148, 158, 0.2);
+            color: var(--text-secondary);
+        }
+
+        /* Right Sidebar */
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-secondary);
+        }
+
+        .sidebar-section {
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .sidebar-header {
+            padding: 12px 16px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            color: var(--text-secondary);
+            background: var(--bg-tertiary);
+        }
+
+        .sidebar-content {
+            padding: 12px 16px;
+        }
+
+        /* Profile Settings */
+        .setting-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            font-size: 13px;
+        }
+
+        .setting-label {
+            color: var(--text-secondary);
+        }
+
+        .setting-value {
+            font-family: 'SF Mono', Monaco, monospace;
+            color: var(--text-primary);
+        }
+
+        /* Alerts */
+        .alerts-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .alert-item {
+            padding: 10px 0;
+            border-bottom: 1px solid var(--border-color);
+            font-size: 12px;
+        }
+
+        .alert-item:last-child {
+            border-bottom: none;
+        }
+
+        .alert-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+
+        .alert-type {
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+        }
+
+        .alert-type.HOD_BREAK {
+            background: rgba(88, 166, 255, 0.2);
+            color: var(--accent-blue);
+        }
+
+        .alert-type.MOMO_SURGE {
+            background: rgba(35, 134, 54, 0.2);
+            color: var(--accent-green-light);
+        }
+
+        .alert-type.GAP_ALERT {
+            background: rgba(210, 153, 34, 0.2);
+            color: var(--accent-yellow);
+        }
+
+        .alert-time {
+            color: var(--text-secondary);
+        }
+
+        .alert-message {
+            color: var(--text-primary);
+        }
+
+        /* Stats */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .stat-box {
+            background: var(--bg-tertiary);
+            padding: 12px;
+            border-radius: 6px;
+        }
+
+        .stat-value {
+            font-size: 20px;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 4px;
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 500;
+            cursor: pointer;
+            border: 1px solid var(--border-color);
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            transition: all 0.2s;
+        }
+
+        .btn:hover {
+            background: var(--bg-secondary);
+            border-color: var(--text-secondary);
+        }
+
+        .btn-primary {
+            background: var(--accent-green);
+            border-color: var(--accent-green);
+        }
+
+        .btn-primary:hover {
+            background: var(--accent-green-light);
+        }
+
+        /* Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            width: 500px;
+            max-width: 90%;
+            max-height: 80vh;
+            overflow: auto;
+        }
+
+        .modal-header {
+            padding: 16px 20px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h3 {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .modal-close {
+            background: none;
+            border: none;
+            color: var(--text-secondary);
+            font-size: 20px;
+            cursor: pointer;
+        }
+
+        .modal-body {
+            padding: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            margin-bottom: 6px;
+            color: var(--text-secondary);
+        }
+
+        .form-group input,
+        .form-group select,
+        .form-group textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 14px;
+        }
+
+        .form-group input:focus,
+        .form-group select:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: var(--accent-blue);
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        .modal-footer {
+            padding: 16px 20px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            justify-content: flex-end;
+            gap: 10px;
+        }
+
+        /* Loading */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 40px;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            width: 24px;
+            height: 24px;
+            border: 2px solid var(--border-color);
+            border-top-color: var(--accent-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 10px;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Responsive */
+        @media (max-width: 900px) {
+            .main-container {
+                grid-template-columns: 1fr;
+            }
+            .sidebar {
+                display: none;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <h1>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+                <path d="M2 17l10 5 10-5"/>
+                <path d="M2 12l10 5 10-5"/>
+            </svg>
+            MAX_AI <span>Scanner</span>
+        </h1>
+        <div class="status-badge">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Connecting...</span>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <div class="scanner-panel">
+            <div class="profile-tabs" id="profileTabs">
+                <!-- Tabs will be populated dynamically -->
+            </div>
+            <div class="scanner-content">
+                <table class="scanner-table">
+                    <thead>
+                        <tr>
+                            <th>#</th>
+                            <th class="sortable" data-sort="symbol">Symbol</th>
+                            <th class="sortable" data-sort="last_price">Price</th>
+                            <th class="sortable" data-sort="change_pct">Change %</th>
+                            <th class="sortable" data-sort="volume">Volume</th>
+                            <th class="sortable" data-sort="rvol">RVOL</th>
+                            <th class="sortable" data-sort="velocity">Velocity</th>
+                            <th class="sortable" data-sort="hod_proximity">HOD %</th>
+                            <th class="sortable" data-sort="ai_score">AI Score</th>
+                        </tr>
+                    </thead>
+                    <tbody id="scannerBody">
+                        <tr>
+                            <td colspan="9" class="loading">
+                                <div class="spinner"></div>
+                                Loading scanner data...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="sidebar">
+            <div class="sidebar-section">
+                <div class="sidebar-header">Scanner Stats</div>
+                <div class="sidebar-content">
+                    <div class="stats-grid">
+                        <div class="stat-box">
+                            <div class="stat-value" id="statCandidates">-</div>
+                            <div class="stat-label">Candidates</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value" id="statScanTime">-</div>
+                            <div class="stat-label">Scan Time</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value" id="statScans">-</div>
+                            <div class="stat-label">Total Scans</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-value" id="statUptime">-</div>
+                            <div class="stat-label">Uptime</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="sidebar-section">
+                <div class="sidebar-header">
+                    Profile Settings
+                    <button class="btn" style="float: right; padding: 4px 10px; font-size: 11px;" onclick="openProfileModal()">
+                        + New
+                    </button>
+                </div>
+                <div class="sidebar-content" id="profileSettings">
+                    <!-- Profile settings will be populated -->
+                </div>
+            </div>
+
+            <div class="sidebar-section" style="flex: 1; display: flex; flex-direction: column;">
+                <div class="sidebar-header">Recent Alerts</div>
+                <div class="sidebar-content alerts-list" id="alertsList">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        Loading alerts...
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Profile Modal -->
+    <div class="modal-overlay" id="profileModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="modalTitle">New Profile</h3>
+                <button class="modal-close" onclick="closeProfileModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Profile Name</label>
+                    <input type="text" id="profileName" placeholder="MY_SCANNER">
+                </div>
+                <div class="form-group">
+                    <label>Description</label>
+                    <input type="text" id="profileDesc" placeholder="Description of this scanner">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Min Price ($)</label>
+                        <input type="number" id="profileMinPrice" value="1" step="0.5">
+                    </div>
+                    <div class="form-group">
+                        <label>Max Price ($)</label>
+                        <input type="number" id="profileMaxPrice" value="500" step="10">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label>Min Volume</label>
+                        <input type="number" id="profileMinVol" value="100000" step="10000">
+                    </div>
+                    <div class="form-group">
+                        <label>Alert Threshold</label>
+                        <input type="number" id="profileAlertThresh" value="0.7" step="0.05" min="0" max="1">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Min Change % (leave empty for no filter)</label>
+                    <input type="number" id="profileMinChange" placeholder="e.g., 2.0" step="0.5">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn" onclick="closeProfileModal()">Cancel</button>
+                <button class="btn btn-primary" onclick="saveProfile()">Create Profile</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://127.0.0.1:8787';
+        let currentProfile = 'ALL_MOVERS';
+        let profiles = [];
+        let refreshInterval = null;
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadProfiles();
+            loadMetrics();
+            loadAlerts();
+            startAutoRefresh();
+        });
+
+        // Load profiles
+        async function loadProfiles() {
+            try {
+                const res = await fetch(`${API_BASE}/profiles`);
+                const data = await res.json();
+                profiles = data.profiles;
+                renderProfileTabs();
+
+                // Set default profile
+                if (profiles.length > 0 && !profiles.find(p => p.name === currentProfile)) {
+                    currentProfile = profiles[0].name;
+                }
+
+                loadScannerData();
+                loadProfileSettings();
+            } catch (err) {
+                console.error('Failed to load profiles:', err);
+                setStatus(false);
+            }
+        }
+
+        // Render profile tabs
+        function renderProfileTabs() {
+            const container = document.getElementById('profileTabs');
+            container.innerHTML = profiles.map(p => `
+                <div class="profile-tab ${p.name === currentProfile ? 'active' : ''}"
+                     onclick="selectProfile('${p.name}')">
+                    ${p.name.replace(/_/g, ' ')}
+                </div>
+            `).join('');
+        }
+
+        // Select profile
+        function selectProfile(name) {
+            currentProfile = name;
+            renderProfileTabs();
+            loadScannerData();
+            loadProfileSettings();
+        }
+
+        // Load scanner data
+        async function loadScannerData() {
+            try {
+                const res = await fetch(`${API_BASE}/scanner/rows?profile=${currentProfile}&limit=50`);
+                const data = await res.json();
+                renderScannerTable(data);
+                setStatus(true);
+
+                // Update stats
+                document.getElementById('statCandidates').textContent = data.total_candidates;
+                document.getElementById('statScanTime').textContent = data.scan_time_ms.toFixed(1) + 'ms';
+            } catch (err) {
+                console.error('Failed to load scanner data:', err);
+                setStatus(false);
+            }
+        }
+
+        // Render scanner table
+        function renderScannerTable(data) {
+            const tbody = document.getElementById('scannerBody');
+
+            if (!data.rows || data.rows.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="9" style="text-align: center; padding: 40px; color: var(--text-secondary);">
+                            No stocks match current filters
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = data.rows.map(row => `
+                <tr>
+                    <td>${row.rank}</td>
+                    <td class="symbol-cell">${row.symbol}</td>
+                    <td class="price-cell">$${row.last_price.toFixed(2)}</td>
+                    <td class="${row.change_pct >= 0 ? 'change-positive' : 'change-negative'}">
+                        ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
+                    </td>
+                    <td>${formatVolume(row.volume)}</td>
+                    <td>${row.rvol.toFixed(2)}x</td>
+                    <td>${row.velocity.toFixed(2)}</td>
+                    <td>${(row.hod_proximity * 100).toFixed(1)}%</td>
+                    <td>
+                        <span class="ai-score ${getAIScoreClass(row.ai_score)}">
+                            ${row.ai_score.toFixed(2)}
+                        </span>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // Format volume
+        function formatVolume(vol) {
+            if (vol >= 1000000) return (vol / 1000000).toFixed(1) + 'M';
+            if (vol >= 1000) return (vol / 1000).toFixed(0) + 'K';
+            return vol;
+        }
+
+        // Get AI score class
+        function getAIScoreClass(score) {
+            if (score >= 0.7) return 'high';
+            if (score >= 0.4) return 'medium';
+            return 'low';
+        }
+
+        // Load profile settings
+        async function loadProfileSettings() {
+            try {
+                const res = await fetch(`${API_BASE}/profiles/${currentProfile}`);
+                const profile = await res.json();
+
+                document.getElementById('profileSettings').innerHTML = `
+                    <div class="setting-row">
+                        <span class="setting-label">Min Price</span>
+                        <span class="setting-value">$${profile.min_price}</span>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label">Max Price</span>
+                        <span class="setting-value">$${profile.max_price}</span>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label">Min Volume</span>
+                        <span class="setting-value">${formatVolume(profile.min_volume)}</span>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label">Alert Threshold</span>
+                        <span class="setting-value">${profile.alert_threshold}</span>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label">Alerts</span>
+                        <span class="setting-value">${profile.alert_enabled ? 'Enabled' : 'Disabled'}</span>
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label">Conditions</span>
+                        <span class="setting-value">${profile.conditions.length}</span>
+                    </div>
+                `;
+            } catch (err) {
+                console.error('Failed to load profile settings:', err);
+            }
+        }
+
+        // Load metrics
+        async function loadMetrics() {
+            try {
+                const res = await fetch(`${API_BASE}/metrics`);
+                const metrics = await res.json();
+
+                document.getElementById('statScans').textContent = metrics.scan_count;
+                document.getElementById('statUptime').textContent = formatUptime(metrics.uptime_seconds);
+            } catch (err) {
+                console.error('Failed to load metrics:', err);
+            }
+        }
+
+        // Format uptime
+        function formatUptime(seconds) {
+            if (!seconds) return '-';
+            if (seconds < 60) return Math.floor(seconds) + 's';
+            if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+            return Math.floor(seconds / 3600) + 'h';
+        }
+
+        // Load alerts
+        async function loadAlerts() {
+            try {
+                const res = await fetch(`${API_BASE}/alerts/recent?limit=20`);
+                const data = await res.json();
+                renderAlerts(data.alerts);
+            } catch (err) {
+                console.error('Failed to load alerts:', err);
+            }
+        }
+
+        // Render alerts
+        function renderAlerts(alerts) {
+            const container = document.getElementById('alertsList');
+
+            if (!alerts || alerts.length === 0) {
+                container.innerHTML = '<div style="color: var(--text-secondary); font-size: 13px;">No recent alerts</div>';
+                return;
+            }
+
+            container.innerHTML = alerts.slice(0, 15).map(alert => `
+                <div class="alert-item">
+                    <div class="alert-header">
+                        <span class="alert-type ${alert.alert_type}">${alert.alert_type.replace('_', ' ')}</span>
+                        <span class="alert-time">${formatTime(alert.timestamp)}</span>
+                    </div>
+                    <div class="alert-message">${alert.message}</div>
+                </div>
+            `).join('');
+        }
+
+        // Format time
+        function formatTime(timestamp) {
+            const date = new Date(timestamp);
+            return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+        }
+
+        // Set connection status
+        function setStatus(connected) {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+
+            if (connected) {
+                dot.classList.remove('disconnected');
+                text.textContent = 'Connected';
+            } else {
+                dot.classList.add('disconnected');
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        // Auto refresh
+        function startAutoRefresh() {
+            refreshInterval = setInterval(() => {
+                loadScannerData();
+                loadAlerts();
+            }, 2000);
+        }
+
+        // Profile modal
+        function openProfileModal() {
+            document.getElementById('profileModal').classList.add('active');
+        }
+
+        function closeProfileModal() {
+            document.getElementById('profileModal').classList.remove('active');
+        }
+
+        // Save profile
+        async function saveProfile() {
+            const name = document.getElementById('profileName').value.trim().toUpperCase().replace(/\s+/g, '_');
+            const desc = document.getElementById('profileDesc').value.trim();
+            const minPrice = parseFloat(document.getElementById('profileMinPrice').value) || 1;
+            const maxPrice = parseFloat(document.getElementById('profileMaxPrice').value) || 500;
+            const minVol = parseInt(document.getElementById('profileMinVol').value) || 100000;
+            const alertThresh = parseFloat(document.getElementById('profileAlertThresh').value) || 0.7;
+            const minChange = parseFloat(document.getElementById('profileMinChange').value);
+
+            if (!name) {
+                alert('Please enter a profile name');
+                return;
+            }
+
+            const conditions = [];
+            if (!isNaN(minChange) && minChange > 0) {
+                conditions.push({
+                    field: 'change_pct',
+                    operator: 'gte',
+                    value: minChange
+                });
+            }
+
+            try {
+                const res = await fetch(`${API_BASE}/profiles`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name,
+                        description: desc,
+                        conditions,
+                        min_price: minPrice,
+                        max_price: maxPrice,
+                        min_volume: minVol,
+                        alert_threshold: alertThresh,
+                        alert_enabled: true
+                    })
+                });
+
+                if (res.ok) {
+                    closeProfileModal();
+                    await loadProfiles();
+                    selectProfile(name);
+                } else {
+                    const err = await res.json();
+                    alert('Error: ' + (err.detail || 'Failed to create profile'));
+                }
+            } catch (err) {
+                alert('Failed to create profile: ' + err.message);
+            }
+        }
+
+        // Sort table
+        document.querySelectorAll('.sortable').forEach(th => {
+            th.addEventListener('click', () => {
+                // TODO: Implement sorting
+            });
+        });
+    </script>
+</body>
+</html>
