@@ -193,6 +193,35 @@
             background: rgba(46, 160, 67, 0.2);
         }
 
+        .panel-title .halt-badge {
+            color: var(--accent-red);
+            background: rgba(218, 54, 51, 0.2);
+        }
+
+        .halt-status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 10px;
+            font-size: 10px;
+            font-weight: 600;
+        }
+
+        .halt-status.halted {
+            background: rgba(218, 54, 51, 0.3);
+            color: var(--accent-red);
+            animation: halt-pulse 1.5s infinite;
+        }
+
+        .halt-status.resumed {
+            background: rgba(46, 160, 67, 0.3);
+            color: var(--accent-green-light);
+        }
+
+        @keyframes halt-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
         .panel-title .count {
             font-size: 11px;
             font-weight: 400;
@@ -708,6 +737,7 @@
                         <select id="panelSource" onchange="toggleSourceOptions()">
                             <option value="scanner">Scanner Profile</option>
                             <option value="finviz">Finviz Top Gainers</option>
+                            <option value="halts">Trading Halts</option>
                         </select>
                     </div>
                     <div class="form-group" id="profileGroup">
@@ -1101,32 +1131,53 @@
         // Create panel HTML
         function createPanelHTML(panel) {
             const isFinviz = panel.source === 'finviz';
-            const sourceLabel = isFinviz ? 'FINVIZ' : panel.profile.replace(/_/g, ' ');
-            const sourceBadgeClass = isFinviz ? 'panel-profile finviz-badge' : 'panel-profile';
+            const isHalts = panel.source === 'halts';
 
-            // Different columns for Finviz vs Scanner
-            const headers = isFinviz ? `
-                <th onclick="sortPanel('${panel.id}', 'rank')">#</th>
-                <th onclick="sortPanel('${panel.id}', 'symbol')">Symbol</th>
-                <th onclick="sortPanel('${panel.id}', 'price')">Price</th>
-                <th onclick="sortPanel('${panel.id}', 'change_pct')">Chg %</th>
-                <th onclick="sortPanel('${panel.id}', 'volume')">Volume</th>
-                <th onclick="sortPanel('${panel.id}', 'float_shares')">Float</th>
-                <th onclick="sortPanel('${panel.id}', 'avg_volume')">Avg Vol</th>
-                <th onclick="sortPanel('${panel.id}', 'short_float')">Short%</th>
-                <th onclick="sortPanel('${panel.id}', 'market_cap')">Mkt Cap</th>
-            ` : `
-                <th onclick="sortPanel('${panel.id}', 'rank')">#</th>
-                <th onclick="sortPanel('${panel.id}', 'symbol')">Symbol</th>
-                <th onclick="sortPanel('${panel.id}', 'last_price')">Price</th>
-                <th onclick="sortPanel('${panel.id}', 'change_pct')">Chg %</th>
-                <th onclick="sortPanel('${panel.id}', 'volume')">Volume</th>
-                <th onclick="sortPanel('${panel.id}', 'float_shares')">Float</th>
-                <th onclick="sortPanel('${panel.id}', 'rvol')">RVOL</th>
-                <th onclick="sortPanel('${panel.id}', 'velocity')">Vel</th>
-                <th onclick="sortPanel('${panel.id}', 'high')">HOD</th>
-                <th onclick="sortPanel('${panel.id}', 'ai_score')">AI</th>
-            `;
+            let sourceLabel, sourceBadgeClass, headers;
+
+            if (isHalts) {
+                sourceLabel = 'HALTS';
+                sourceBadgeClass = 'panel-profile halt-badge';
+                headers = `
+                    <th>Status</th>
+                    <th onclick="sortPanel('${panel.id}', 'symbol')">Symbol</th>
+                    <th onclick="sortPanel('${panel.id}', 'halt_time')">Halt Time</th>
+                    <th onclick="sortPanel('${panel.id}', 'halt_price')">Halt $</th>
+                    <th onclick="sortPanel('${panel.id}', 'resume_time')">Resume Time</th>
+                    <th onclick="sortPanel('${panel.id}', 'resume_price')">Resume $</th>
+                    <th onclick="sortPanel('${panel.id}', 'halt_duration_minutes')">Duration</th>
+                    <th>Reason</th>
+                `;
+            } else if (isFinviz) {
+                sourceLabel = 'FINVIZ';
+                sourceBadgeClass = 'panel-profile finviz-badge';
+                headers = `
+                    <th onclick="sortPanel('${panel.id}', 'rank')">#</th>
+                    <th onclick="sortPanel('${panel.id}', 'symbol')">Symbol</th>
+                    <th onclick="sortPanel('${panel.id}', 'price')">Price</th>
+                    <th onclick="sortPanel('${panel.id}', 'change_pct')">Chg %</th>
+                    <th onclick="sortPanel('${panel.id}', 'volume')">Volume</th>
+                    <th onclick="sortPanel('${panel.id}', 'float_shares')">Float</th>
+                    <th onclick="sortPanel('${panel.id}', 'avg_volume')">Avg Vol</th>
+                    <th onclick="sortPanel('${panel.id}', 'short_float')">Short%</th>
+                    <th onclick="sortPanel('${panel.id}', 'market_cap')">Mkt Cap</th>
+                `;
+            } else {
+                sourceLabel = panel.profile.replace(/_/g, ' ');
+                sourceBadgeClass = 'panel-profile';
+                headers = `
+                    <th onclick="sortPanel('${panel.id}', 'rank')">#</th>
+                    <th onclick="sortPanel('${panel.id}', 'symbol')">Symbol</th>
+                    <th onclick="sortPanel('${panel.id}', 'last_price')">Price</th>
+                    <th onclick="sortPanel('${panel.id}', 'change_pct')">Chg %</th>
+                    <th onclick="sortPanel('${panel.id}', 'volume')">Volume</th>
+                    <th onclick="sortPanel('${panel.id}', 'float_shares')">Float</th>
+                    <th onclick="sortPanel('${panel.id}', 'rvol')">RVOL</th>
+                    <th onclick="sortPanel('${panel.id}', 'velocity')">Vel</th>
+                    <th onclick="sortPanel('${panel.id}', 'high')">HOD</th>
+                    <th onclick="sortPanel('${panel.id}', 'ai_score')">AI</th>
+                `;
+            }
 
             // Get saved position/size or calculate default
             const pos = panel.position || getDefaultPosition(panels.indexOf(panel));
@@ -1246,7 +1297,18 @@
             try {
                 let fetchedRows = [];
 
-                if (panel.source === 'finviz') {
+                if (panel.source === 'halts') {
+                    // Fetch from Halts endpoint
+                    const res = await fetch(`${API_BASE}/halts`);
+                    const data = await res.json();
+                    fetchedRows = data.halts || [];
+
+                    // Render halts directly (no sticky list needed)
+                    renderHaltsTable(panelId, fetchedRows);
+                    document.getElementById(`count-${panelId}`).textContent = fetchedRows.length;
+                    setStatus(true);
+                    return;  // Early return for halts
+                } else if (panel.source === 'finviz') {
                     // Fetch from Finviz endpoint - get ALL top gainers, no price filter
                     const params = new URLSearchParams({
                         max_price: 1000,  // No practical limit
@@ -1536,6 +1598,57 @@
                 </td>
                 <td><span class="cell-score ${getScoreClass(row.ai_score || 0)}">${(row.ai_score || 0).toFixed(2)}</span></td>
             `;
+        }
+
+        // Render halts table
+        function renderHaltsTable(panelId, halts) {
+            const tbody = document.getElementById(`tbody-${panelId}`);
+
+            if (halts.length === 0) {
+                tbody.innerHTML = `
+                    <tr><td colspan="8" class="empty-state">
+                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                            <circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
+                        </svg>
+                        No trading halts detected
+                    </td></tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = halts.map(halt => {
+                const isHalted = halt.status === 'HALTED';
+                const haltTime = formatHaltTime(halt.halt_time);
+                const resumeTime = halt.resume_time ? formatHaltTime(halt.resume_time) : '-';
+                const duration = halt.halt_duration_minutes ? halt.halt_duration_minutes.toFixed(1) + 'm' : '-';
+                const reason = (halt.halt_reason || '').substring(0, 30);
+
+                return `
+                    <tr class="${isHalted ? 'at-hod' : ''}">
+                        <td><span class="halt-status ${isHalted ? 'halted' : 'resumed'}">${halt.status}</span></td>
+                        <td class="cell-symbol" onclick="showSymbolDetails('${halt.symbol}')">${halt.symbol}</td>
+                        <td>${haltTime}</td>
+                        <td class="cell-price">${halt.halt_price ? '$' + halt.halt_price.toFixed(2) : '-'}</td>
+                        <td>${resumeTime}</td>
+                        <td class="cell-price ${halt.resume_price > halt.halt_price ? 'cell-positive' : 'cell-negative'}">
+                            ${halt.resume_price ? '$' + halt.resume_price.toFixed(2) : '-'}
+                        </td>
+                        <td>${duration}</td>
+                        <td title="${halt.halt_reason || ''}">${reason}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        // Format halt time for display
+        function formatHaltTime(isoString) {
+            if (!isoString) return '-';
+            try {
+                const date = new Date(isoString);
+                return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            } catch {
+                return isoString;
+            }
         }
 
         // Format volume

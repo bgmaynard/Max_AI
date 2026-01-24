@@ -671,6 +671,69 @@ async def get_finviz_quote(symbol: str):
     raise HTTPException(status_code=404, detail=f"No Finviz data for {symbol}")
 
 
+# ============== Trading Halts ==============
+
+from scanner_service.ingest import halt_tracker
+
+
+@app.get("/halts")
+async def get_trading_halts():
+    """Get all current and recent trading halts."""
+    halts = await halt_tracker.fetch_halts()
+    active = [h for h in halts if h.get('status') == 'HALTED']
+    resumed = [h for h in halts if h.get('status') == 'RESUMED']
+
+    return {
+        "count": len(halts),
+        "active_count": len(active),
+        "resumed_count": len(resumed),
+        "halts": halts,
+    }
+
+
+@app.get("/halts/active")
+async def get_active_halts():
+    """Get only currently halted stocks."""
+    await halt_tracker.fetch_halts()  # Refresh first
+    halts = halt_tracker.get_active_halts()
+    return {
+        "count": len(halts),
+        "halts": halts,
+    }
+
+
+@app.get("/halts/resumed")
+async def get_resumed_halts(hours: int = Query(2, ge=1, le=24)):
+    """Get recently resumed halts."""
+    await halt_tracker.fetch_halts()  # Refresh first
+    halts = halt_tracker.get_resumed_halts(hours)
+    return {
+        "count": len(halts),
+        "hours": hours,
+        "halts": halts,
+    }
+
+
+@app.post("/halts/add")
+async def add_manual_halt(
+    symbol: str,
+    halt_price: float,
+    reason: str = "Manual Entry"
+):
+    """Manually add a halt for tracking."""
+    halt = await halt_tracker.add_manual_halt(symbol, halt_price, reason)
+    return {"success": True, "halt": halt}
+
+
+@app.post("/halts/{symbol}/resume")
+async def mark_halt_resumed(symbol: str, resume_price: float):
+    """Mark a halt as resumed with the resume price."""
+    halt = await halt_tracker.update_halt_resume(symbol, resume_price)
+    if halt:
+        return {"success": True, "halt": halt}
+    raise HTTPException(status_code=404, detail=f"No active halt found for {symbol}")
+
+
 # ============== Universe Management ==============
 
 @app.post("/universe/add")
