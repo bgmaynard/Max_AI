@@ -7,53 +7,58 @@ import asyncio
 
 logger = logging.getLogger(__name__)
 
-# Cache for Finviz data (refreshes every 2 minutes)
+# Cache for Finviz data (refreshes every 30 seconds for more real-time data)
 _finviz_cache: dict = {}
 _cache_time: Optional[datetime] = None
-CACHE_TTL_SECONDS = 120
+CACHE_TTL_SECONDS = 30
 
 
 async def get_top_gainers(
-    max_price: float = 20.0,
+    max_price: float = 100.0,
     min_change: float = 0.0,
     max_float_millions: Optional[float] = None,
-    limit: int = 50,
+    limit: int = 500,
 ) -> list[dict]:
     """
-    Fetch top gainers from Finviz with float data.
+    Fetch top gainers from Finviz.
 
     Args:
-        max_price: Maximum stock price (default $20)
-        min_change: Minimum % change (default 0)
-        max_float_millions: Maximum float in millions (optional)
+        max_price: Maximum stock price filter (applied client-side)
+        min_change: Minimum % change (applied client-side)
+        max_float_millions: Maximum float in millions (applied client-side)
         limit: Max results to return
 
     Returns:
-        List of dicts with ticker, price, change, volume, float, etc.
+        List of dicts with ticker, price, change, volume, etc.
     """
     global _finviz_cache, _cache_time
 
-    # Check cache
-    cache_key = f"gainers_{max_price}"
+    # Check cache - single cache for all top gainers
+    cache_key = "all_gainers"
     if (
         _cache_time
         and (datetime.utcnow() - _cache_time).total_seconds() < CACHE_TTL_SECONDS
         and cache_key in _finviz_cache
     ):
         results = _finviz_cache[cache_key]
+        logger.info(f"Using cached Finviz data: {len(results)} gainers")
     else:
         # Fetch fresh data (run in thread to avoid blocking)
         results = await asyncio.get_event_loop().run_in_executor(
-            None, _fetch_finviz_gainers, max_price
+            None, _fetch_finviz_gainers, 100.0  # Get all price ranges
         )
         _finviz_cache[cache_key] = results
         _cache_time = datetime.utcnow()
 
-    # Apply additional filters
+    # Apply optional filters (but return all by default)
     filtered = []
     for row in results:
+        # Price filter
+        if max_price and row.get('price', 0) > max_price:
+            continue
+
         # Change filter
-        if row.get('change_pct', 0) < min_change:
+        if min_change and row.get('change_pct', 0) < min_change:
             continue
 
         # Float filter
@@ -71,68 +76,75 @@ async def get_top_gainers(
 def _fetch_finviz_gainers(max_price: float) -> list[dict]:
     """Synchronous fetch from Finviz (runs in thread)."""
     try:
-        from finvizfinance.screener.ownership import Ownership
+        from finvizfinance.screener.overview import Overview
 
-        # Map price to Finviz filter format
-        if max_price <= 5:
-            price_filter = 'Under $5'
-        elif max_price <= 10:
-            price_filter = 'Under $10'
-        elif max_price <= 20:
-            price_filter = 'Under $20'
-        elif max_price <= 50:
-            price_filter = 'Under $50'
-        else:
-            price_filter = None
+        # Use Overview screener first to get all top gainers
+        foverview = Overview()
+        foverview.set_filter(signal='Top Gainers')
 
-        fown = Ownership()
-        filters = {}
-        if price_filter:
-            filters['Price'] = price_filter
+        # Get up to 500 rows (default is 20)
+        df = foverview.screener_view(order='Change', limit=500, ascend=False)
 
-        fown.set_filter(signal='Top Gainers', filters_dict=filters)
-        df = fown.screener_view()
+        if df is None or df.empty:
+            logger.warning("Finviz returned empty dataframe")
+            return []
+
+        logger.info(f"Finviz Overview returned {len(df)} rows")
+
+        import math
 
         results = []
         for _, row in df.iterrows():
             try:
-                # Parse float value (can be like "1.4M" or raw number)
-                float_val = row.get('Float', 0)
-                if isinstance(float_val, str):
-                    float_val = _parse_number(float_val)
-                float_millions = float_val / 1_000_000 if float_val else 0
-
                 # Parse change (can be like "22.66%" or decimal)
                 change = row.get('Change', 0)
                 if isinstance(change, str):
-                    change = float(change.replace('%', '')) / 100
+                    change = float(change.replace('%', '').replace(',', '')) / 100
                 change_pct = change * 100 if abs(change) < 1 else change
 
-                # Handle NaN values for JSON compliance
-                import math
-                insider_own = row.get('Insider Own', 0)
-                inst_own = row.get('Inst Own', 0)
-                if isinstance(insider_own, float) and math.isnan(insider_own):
-                    insider_own = 0
-                if isinstance(inst_own, float) and math.isnan(inst_own):
-                    inst_own = 0
+                # Parse price
+                price = row.get('Price', 0)
+                if isinstance(price, str):
+                    price = float(price.replace(',', ''))
+                price = float(price or 0)
+
+                # Parse volume
+                volume = row.get('Volume', 0)
+                if isinstance(volume, str):
+                    volume = _parse_number(volume)
+                volume = int(volume or 0)
+
+                # Parse market cap
+                market_cap = _parse_number(row.get('Market Cap', 0)) / 1_000_000
+
+                # Handle NaN
+                if math.isnan(change_pct):
+                    change_pct = 0
+                if math.isnan(price):
+                    price = 0
+
+                ticker = row.get('Ticker', '')
+                if not ticker:
+                    continue
 
                 results.append({
-                    'symbol': row.get('Ticker', ''),
-                    'price': float(row.get('Price', 0) or 0),
-                    'change_pct': change_pct if not math.isnan(change_pct) else 0,
-                    'volume': int(row.get('Volume', 0) or 0),
-                    'float_shares': float_millions if not math.isnan(float_millions) else 0,
-                    'shares_outstanding': _parse_number(row.get('Outstanding', 0)) / 1_000_000,
-                    'avg_volume': int(row.get('Avg Volume', 0) or 0),
-                    'market_cap': _parse_number(row.get('Market Cap', 0)) / 1_000_000,
-                    'short_float': row.get('Short Float', '') or '',
-                    'insider_own': insider_own or 0,
-                    'inst_own': inst_own or 0,
+                    'symbol': ticker,
+                    'price': price,
+                    'change_pct': change_pct,
+                    'volume': volume,
+                    'float_shares': 0,  # Will be enriched later if needed
+                    'shares_outstanding': 0,
+                    'avg_volume': 0,
+                    'market_cap': market_cap,
+                    'short_float': '',
+                    'insider_own': 0,
+                    'inst_own': 0,
                     'source': 'finviz',
+                    'company': row.get('Company', ''),
+                    'sector': row.get('Sector', ''),
                 })
             except Exception as e:
-                logger.warning(f"Error parsing Finviz row: {e}")
+                logger.warning(f"Error parsing Finviz row {row.get('Ticker', '?')}: {e}")
                 continue
 
         logger.info(f"Fetched {len(results)} top gainers from Finviz")
