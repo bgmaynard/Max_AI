@@ -372,6 +372,15 @@
             background: rgba(210, 153, 34, 0.1) !important;
         }
 
+        tr.stale {
+            opacity: 0.6;
+        }
+
+        tr.stale td:first-child::before {
+            content: '○ ';
+            color: var(--text-secondary);
+        }
+
         @keyframes hod-pulse {
             0%, 100% { background: rgba(35, 134, 54, 0.15); }
             50% { background: rgba(35, 134, 54, 0.25); }
@@ -853,6 +862,9 @@
         // Data cache for smooth updates
         const panelDataCache = new Map();
 
+        // Sticky stock lists - stocks persist until manually cleared
+        const stickyStocks = new Map(); // panelId -> Map<symbol, rowData>
+
         // Initialize
         document.addEventListener('DOMContentLoaded', async () => {
             await loadProfiles();
@@ -1131,6 +1143,11 @@
                             <span class="count" id="count-${panel.id}">0</span>
                         </div>
                         <div class="panel-actions">
+                            <button class="btn btn-sm btn-icon tooltip" data-tooltip="Clear List" onclick="event.stopPropagation(); clearStickyList('${panel.id}')" style="color: var(--accent-yellow);">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                </svg>
+                            </button>
                             <button class="btn btn-sm btn-icon tooltip" data-tooltip="Refresh" onclick="event.stopPropagation(); loadPanelData('${panel.id}')">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
@@ -1220,60 +1237,105 @@
             }
         }
 
-        // Load panel data
+        // Load panel data - uses sticky list to maintain persistence
         async function loadPanelData(panelId) {
             const panel = panels.find(p => p.id === panelId);
             if (!panel) return;
 
             try {
-                let rows = [];
+                let fetchedRows = [];
 
                 if (panel.source === 'finviz') {
                     // Fetch from Finviz endpoint
                     const f = panel.filters || {};
                     const params = new URLSearchParams({
                         max_price: f.maxPrice || 20,
-                        limit: panel.maxRows || 50
+                        limit: 100 // Fetch more to build sticky list
                     });
                     if (f.maxFloat) params.append('max_float', f.maxFloat);
                     if (f.minChange) params.append('min_change', f.minChange);
 
                     const res = await fetch(`${API_BASE}/finviz/top-gainers?${params}`);
                     const data = await res.json();
-                    rows = data.gainers || [];
+                    fetchedRows = data.gainers || [];
 
-                    // Normalize field names for sorting
-                    rows = rows.map((r, i) => ({
+                    // Normalize field names
+                    fetchedRows = fetchedRows.map((r, i) => ({
                         ...r,
-                        rank: i + 1,
-                        last_price: r.price
+                        last_price: r.price,
+                        _lastSeen: Date.now()
                     }));
                 } else {
                     // Fetch from scanner endpoint
-                    const res = await fetch(`${API_BASE}/scanner/rows?profile=${panel.profile}&limit=${panel.maxRows || 100}`);
+                    const res = await fetch(`${API_BASE}/scanner/rows?profile=${panel.profile}&limit=200`);
                     const data = await res.json();
-                    rows = data.rows || [];
+                    fetchedRows = (data.rows || []).map(r => ({
+                        ...r,
+                        _lastSeen: Date.now()
+                    }));
                 }
 
-                // Apply client-side filters
+                // Initialize sticky list for this panel if needed
+                if (!stickyStocks.has(panelId)) {
+                    stickyStocks.set(panelId, new Map());
+                }
+                const sticky = stickyStocks.get(panelId);
+
+                // Merge fetched data into sticky list
+                for (const row of fetchedRows) {
+                    const existing = sticky.get(row.symbol);
+                    if (existing) {
+                        // Update existing stock data, keep track of previous values
+                        sticky.set(row.symbol, {
+                            ...row,
+                            _prevPrice: existing.last_price || existing.price,
+                            _addedAt: existing._addedAt
+                        });
+                    } else {
+                        // New stock - add to sticky list
+                        sticky.set(row.symbol, {
+                            ...row,
+                            _addedAt: Date.now()
+                        });
+                    }
+                }
+
+                // Mark stocks not in current fetch as stale (but keep them)
+                const fetchedSymbols = new Set(fetchedRows.map(r => r.symbol));
+                sticky.forEach((data, symbol) => {
+                    if (!fetchedSymbols.has(symbol)) {
+                        data._stale = true;
+                    } else {
+                        data._stale = false;
+                    }
+                });
+
+                // Convert sticky map to array and apply filters
+                let rows = Array.from(sticky.values());
                 rows = applyFilters(rows, panel.filters, panel.source);
 
                 // Sort
                 const defaultSort = panel.source === 'finviz' ? 'change_pct' : 'ai_score';
                 rows = sortRows(rows, panel.sortBy || defaultSort, panel.sortDir || 'desc');
 
-                // Limit
+                // Limit display (but keep all in sticky list)
                 rows = rows.slice(0, panel.maxRows || 50);
 
                 // Render
                 renderPanelTable(panelId, rows, panel.source);
-                document.getElementById(`count-${panelId}`).textContent = rows.length;
+                document.getElementById(`count-${panelId}`).textContent = `${rows.length}/${sticky.size}`;
 
                 setStatus(true);
             } catch (err) {
                 console.error(`Failed to load panel ${panelId}:`, err);
                 setStatus(false);
             }
+        }
+
+        // Clear sticky list for a panel
+        function clearStickyList(panelId) {
+            stickyStocks.delete(panelId);
+            loadPanelData(panelId);
         }
 
         // Apply filters to rows
@@ -1421,13 +1483,18 @@
             const floatShares = row.float_shares || 0;
             const isLowFloat = floatShares > 0 && floatShares < 20;
             const isVeryLowFloat = floatShares > 0 && floatShares < 5;
+            const isStale = row._stale;
 
-            tr.className = isVeryLowFloat ? 'at-hod' : '';
+            let classes = [];
+            if (isVeryLowFloat) classes.push('at-hod');
+            if (isStale) classes.push('stale');
+            tr.className = classes.join(' ');
 
+            const price = row.price || row.last_price || 0;
             tr.innerHTML = `
                 <td>${index + 1}</td>
                 <td class="cell-symbol" onclick="showSymbolDetails('${row.symbol}')">${row.symbol}</td>
-                <td class="cell-price">$${row.price.toFixed(2)}</td>
+                <td class="cell-price">$${price.toFixed(2)}</td>
                 <td class="${row.change_pct >= 0 ? 'cell-positive' : 'cell-negative'}">
                     ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
                 </td>
@@ -1445,8 +1512,13 @@
             const isNearHOD = row.hod_proximity >= 0.95 && row.hod_proximity < 0.98;
             const floatShares = row.float_shares || 0;
             const isLowFloat = floatShares > 0 && floatShares < 20;
+            const isStale = row._stale;
 
-            tr.className = isAtHOD ? 'at-hod' : (isNearHOD ? 'near-hod' : '');
+            let classes = [];
+            if (isAtHOD) classes.push('at-hod');
+            else if (isNearHOD) classes.push('near-hod');
+            if (isStale) classes.push('stale');
+            tr.className = classes.join(' ');
 
             tr.innerHTML = `
                 <td>${index + 1}</td>
