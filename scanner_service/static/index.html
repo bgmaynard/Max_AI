@@ -1246,14 +1246,12 @@
                 let fetchedRows = [];
 
                 if (panel.source === 'finviz') {
-                    // Fetch from Finviz endpoint
-                    const f = panel.filters || {};
+                    // Fetch from Finviz endpoint - use broad filters to get all candidates
+                    // Client-side filters will handle display filtering
                     const params = new URLSearchParams({
-                        max_price: f.maxPrice || 20,
-                        limit: 100 // Fetch more to build sticky list
+                        max_price: 50,  // Broad price range
+                        limit: 100      // Fetch plenty to build sticky list
                     });
-                    if (f.maxFloat) params.append('max_float', f.maxFloat);
-                    if (f.minChange) params.append('min_change', f.minChange);
 
                     const res = await fetch(`${API_BASE}/finviz/top-gainers?${params}`);
                     const data = await res.json();
@@ -1266,7 +1264,7 @@
                         _lastSeen: Date.now()
                     }));
                 } else {
-                    // Fetch from scanner endpoint
+                    // Fetch from scanner endpoint - get broad data
                     const res = await fetch(`${API_BASE}/scanner/rows?profile=${panel.profile}&limit=200`);
                     const data = await res.json();
                     fetchedRows = (data.rows || []).map(r => ({
