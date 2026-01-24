@@ -166,6 +166,11 @@
             letter-spacing: 0.5px;
         }
 
+        .panel-title .finviz-badge {
+            color: var(--accent-green-light);
+            background: rgba(46, 160, 67, 0.2);
+        }
+
         .panel-title .count {
             font-size: 11px;
             font-weight: 400;
@@ -668,6 +673,13 @@
                         <input type="text" id="panelName" placeholder="My Scanner">
                     </div>
                     <div class="form-group">
+                        <label>Data Source</label>
+                        <select id="panelSource" onchange="toggleSourceOptions()">
+                            <option value="scanner">Scanner Profile</option>
+                            <option value="finviz">Finviz Top Gainers</option>
+                        </select>
+                    </div>
+                    <div class="form-group" id="profileGroup">
                         <label>Base Profile</label>
                         <select id="panelProfile">
                             <!-- Options populated dynamically -->
@@ -858,6 +870,13 @@
             }
         }
 
+        // Toggle source options visibility
+        function toggleSourceOptions() {
+            const source = document.getElementById('panelSource').value;
+            const profileGroup = document.getElementById('profileGroup');
+            profileGroup.style.display = source === 'scanner' ? 'block' : 'none';
+        }
+
         // Load saved dashboard from localStorage
         function loadDashboard() {
             const saved = localStorage.getItem('maxai_dashboard');
@@ -876,6 +895,7 @@
                 panels = [{
                     id: generateId(),
                     name: 'All Movers',
+                    source: 'scanner',
                     profile: 'ALL_MOVERS',
                     filters: {},
                     sortBy: 'ai_score',
@@ -920,12 +940,40 @@
 
         // Create panel HTML
         function createPanelHTML(panel) {
+            const isFinviz = panel.source === 'finviz';
+            const sourceLabel = isFinviz ? 'FINVIZ' : panel.profile.replace(/_/g, ' ');
+            const sourceBadgeClass = isFinviz ? 'panel-profile finviz-badge' : 'panel-profile';
+
+            // Different columns for Finviz vs Scanner
+            const headers = isFinviz ? `
+                <th onclick="sortPanel('${panel.id}', 'rank')">#</th>
+                <th onclick="sortPanel('${panel.id}', 'symbol')">Symbol</th>
+                <th onclick="sortPanel('${panel.id}', 'price')">Price</th>
+                <th onclick="sortPanel('${panel.id}', 'change_pct')">Chg %</th>
+                <th onclick="sortPanel('${panel.id}', 'volume')">Volume</th>
+                <th onclick="sortPanel('${panel.id}', 'float_shares')">Float</th>
+                <th onclick="sortPanel('${panel.id}', 'avg_volume')">Avg Vol</th>
+                <th onclick="sortPanel('${panel.id}', 'short_float')">Short%</th>
+                <th onclick="sortPanel('${panel.id}', 'market_cap')">Mkt Cap</th>
+            ` : `
+                <th onclick="sortPanel('${panel.id}', 'rank')">#</th>
+                <th onclick="sortPanel('${panel.id}', 'symbol')">Symbol</th>
+                <th onclick="sortPanel('${panel.id}', 'last_price')">Price</th>
+                <th onclick="sortPanel('${panel.id}', 'change_pct')">Chg %</th>
+                <th onclick="sortPanel('${panel.id}', 'volume')">Volume</th>
+                <th onclick="sortPanel('${panel.id}', 'float_shares')">Float</th>
+                <th onclick="sortPanel('${panel.id}', 'rvol')">RVOL</th>
+                <th onclick="sortPanel('${panel.id}', 'velocity')">Vel</th>
+                <th onclick="sortPanel('${panel.id}', 'high')">HOD</th>
+                <th onclick="sortPanel('${panel.id}', 'ai_score')">AI</th>
+            `;
+
             return `
                 <div class="panel" data-panel-id="${panel.id}">
                     <div class="panel-header">
                         <div class="panel-title">
                             <span class="panel-name">${panel.name}</span>
-                            <span class="panel-profile">${panel.profile.replace(/_/g, ' ')}</span>
+                            <span class="${sourceBadgeClass}">${sourceLabel}</span>
                             <span class="count" id="count-${panel.id}">0</span>
                         </div>
                         <div class="panel-actions">
@@ -948,18 +996,7 @@
                     <div class="panel-content">
                         <table class="scanner-table">
                             <thead>
-                                <tr>
-                                    <th onclick="sortPanel('${panel.id}', 'rank')">#</th>
-                                    <th onclick="sortPanel('${panel.id}', 'symbol')">Symbol</th>
-                                    <th onclick="sortPanel('${panel.id}', 'last_price')">Price</th>
-                                    <th onclick="sortPanel('${panel.id}', 'change_pct')">Chg %</th>
-                                    <th onclick="sortPanel('${panel.id}', 'volume')">Volume</th>
-                                    <th onclick="sortPanel('${panel.id}', 'float_shares')">Float</th>
-                                    <th onclick="sortPanel('${panel.id}', 'rvol')">RVOL</th>
-                                    <th onclick="sortPanel('${panel.id}', 'velocity')">Vel</th>
-                                    <th onclick="sortPanel('${panel.id}', 'high')">HOD</th>
-                                    <th onclick="sortPanel('${panel.id}', 'ai_score')">AI</th>
-                                </tr>
+                                <tr>${headers}</tr>
                             </thead>
                             <tbody id="tbody-${panel.id}">
                                 <tr><td colspan="10" class="empty-state">Loading...</td></tr>
@@ -1034,22 +1071,47 @@
             if (!panel) return;
 
             try {
-                const res = await fetch(`${API_BASE}/scanner/rows?profile=${panel.profile}&limit=${panel.maxRows || 100}`);
-                const data = await res.json();
+                let rows = [];
 
-                let rows = data.rows || [];
+                if (panel.source === 'finviz') {
+                    // Fetch from Finviz endpoint
+                    const f = panel.filters || {};
+                    const params = new URLSearchParams({
+                        max_price: f.maxPrice || 20,
+                        limit: panel.maxRows || 50
+                    });
+                    if (f.maxFloat) params.append('max_float', f.maxFloat);
+                    if (f.minChange) params.append('min_change', f.minChange);
+
+                    const res = await fetch(`${API_BASE}/finviz/top-gainers?${params}`);
+                    const data = await res.json();
+                    rows = data.gainers || [];
+
+                    // Normalize field names for sorting
+                    rows = rows.map((r, i) => ({
+                        ...r,
+                        rank: i + 1,
+                        last_price: r.price
+                    }));
+                } else {
+                    // Fetch from scanner endpoint
+                    const res = await fetch(`${API_BASE}/scanner/rows?profile=${panel.profile}&limit=${panel.maxRows || 100}`);
+                    const data = await res.json();
+                    rows = data.rows || [];
+                }
 
                 // Apply client-side filters
-                rows = applyFilters(rows, panel.filters);
+                rows = applyFilters(rows, panel.filters, panel.source);
 
                 // Sort
-                rows = sortRows(rows, panel.sortBy || 'ai_score', panel.sortDir || 'desc');
+                const defaultSort = panel.source === 'finviz' ? 'change_pct' : 'ai_score';
+                rows = sortRows(rows, panel.sortBy || defaultSort, panel.sortDir || 'desc');
 
                 // Limit
                 rows = rows.slice(0, panel.maxRows || 50);
 
                 // Render
-                renderPanelTable(panelId, rows);
+                renderPanelTable(panelId, rows, panel.source);
                 document.getElementById(`count-${panelId}`).textContent = rows.length;
 
                 setStatus(true);
@@ -1060,19 +1122,30 @@
         }
 
         // Apply filters to rows
-        function applyFilters(rows, filters) {
+        function applyFilters(rows, filters, source) {
             if (!filters) return rows;
 
             return rows.filter(row => {
-                if (filters.minPrice && row.last_price < filters.minPrice) return false;
-                if (filters.maxPrice && row.last_price > filters.maxPrice) return false;
+                // Price filter - use 'price' for Finviz, 'last_price' for scanner
+                const price = row.last_price || row.price || 0;
+                if (filters.minPrice && price < filters.minPrice) return false;
+                if (filters.maxPrice && price > filters.maxPrice) return false;
+
+                // Change filter
                 if (filters.minChange && row.change_pct < filters.minChange) return false;
                 if (filters.maxChange && row.change_pct > filters.maxChange) return false;
-                if (filters.minRvol && row.rvol < filters.minRvol) return false;
-                if (filters.minHod && (row.hod_proximity * 100) < filters.minHod) return false;
-                if (filters.minAI && row.ai_score < filters.minAI) return false;
-                if (filters.minVelocity && row.velocity < filters.minVelocity) return false;
+
+                // Scanner-specific filters (skip for Finviz)
+                if (source !== 'finviz') {
+                    if (filters.minRvol && row.rvol < filters.minRvol) return false;
+                    if (filters.minHod && (row.hod_proximity * 100) < filters.minHod) return false;
+                    if (filters.minAI && row.ai_score < filters.minAI) return false;
+                    if (filters.minVelocity && row.velocity < filters.minVelocity) return false;
+                }
+
+                // Volume filter
                 if (filters.minVolume && row.volume < filters.minVolume) return false;
+
                 // Float filter (minFloatK in thousands, maxFloat in millions)
                 if (filters.maxFloat && row.float_shares > 0 && row.float_shares > filters.maxFloat) return false;
                 // minFloatK is in thousands, convert to millions for comparison
@@ -1107,8 +1180,9 @@
         }
 
         // Render panel table
-        function renderPanelTable(panelId, rows) {
+        function renderPanelTable(panelId, rows, source) {
             const tbody = document.getElementById(`tbody-${panelId}`);
+            const isFinviz = source === 'finviz';
 
             if (rows.length === 0) {
                 tbody.innerHTML = `
@@ -1122,31 +1196,55 @@
                 return;
             }
 
-            tbody.innerHTML = rows.map((row, i) => {
-                const isAtHOD = row.hod_proximity >= 0.98;
-                const isNearHOD = row.hod_proximity >= 0.95 && row.hod_proximity < 0.98;
-                const hodClass = isAtHOD ? 'at-hod' : (isNearHOD ? 'near-hod' : '');
-                const floatShares = row.float_shares || 0;
-                const isLowFloat = floatShares > 0 && floatShares < 20; // Under 20M shares
-                return `
-                <tr class="${hodClass}">
-                    <td>${i + 1}</td>
-                    <td class="cell-symbol" onclick="showSymbolDetails('${row.symbol}')">${row.symbol}</td>
-                    <td class="cell-price">$${row.last_price.toFixed(2)}</td>
-                    <td class="${row.change_pct >= 0 ? 'cell-positive' : 'cell-negative'}">
-                        ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
-                    </td>
-                    <td>${formatVolume(row.volume)}</td>
-                    <td class="${isLowFloat ? 'cell-positive' : ''}">${formatFloat(floatShares)}</td>
-                    <td>${row.rvol.toFixed(1)}x</td>
-                    <td>${row.velocity.toFixed(2)}</td>
-                    <td class="cell-hod ${isAtHOD ? 'hod-hit' : ''}">
-                        $${(row.high || 0).toFixed(2)}
-                        ${isAtHOD ? '<span class="hod-badge">HOD!</span>' : ''}
-                    </td>
-                    <td><span class="cell-score ${getScoreClass(row.ai_score)}">${row.ai_score.toFixed(2)}</span></td>
-                </tr>
-            `}).join('');
+            if (isFinviz) {
+                // Finviz table rows
+                tbody.innerHTML = rows.map((row, i) => {
+                    const floatShares = row.float_shares || 0;
+                    const isLowFloat = floatShares > 0 && floatShares < 20;
+                    const isVeryLowFloat = floatShares > 0 && floatShares < 5;
+                    return `
+                    <tr class="${isVeryLowFloat ? 'at-hod' : ''}">
+                        <td>${i + 1}</td>
+                        <td class="cell-symbol" onclick="showSymbolDetails('${row.symbol}')">${row.symbol}</td>
+                        <td class="cell-price">$${row.price.toFixed(2)}</td>
+                        <td class="${row.change_pct >= 0 ? 'cell-positive' : 'cell-negative'}">
+                            ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
+                        </td>
+                        <td>${formatVolume(row.volume)}</td>
+                        <td class="${isLowFloat ? 'cell-positive' : ''}" style="${isVeryLowFloat ? 'font-weight:bold' : ''}">${formatFloat(floatShares)}</td>
+                        <td>${formatVolume(row.avg_volume)}</td>
+                        <td>${row.short_float || '-'}</td>
+                        <td>${formatMarketCap(row.market_cap)}</td>
+                    </tr>
+                `}).join('');
+            } else {
+                // Scanner table rows
+                tbody.innerHTML = rows.map((row, i) => {
+                    const isAtHOD = row.hod_proximity >= 0.98;
+                    const isNearHOD = row.hod_proximity >= 0.95 && row.hod_proximity < 0.98;
+                    const hodClass = isAtHOD ? 'at-hod' : (isNearHOD ? 'near-hod' : '');
+                    const floatShares = row.float_shares || 0;
+                    const isLowFloat = floatShares > 0 && floatShares < 20;
+                    return `
+                    <tr class="${hodClass}">
+                        <td>${i + 1}</td>
+                        <td class="cell-symbol" onclick="showSymbolDetails('${row.symbol}')">${row.symbol}</td>
+                        <td class="cell-price">$${row.last_price.toFixed(2)}</td>
+                        <td class="${row.change_pct >= 0 ? 'cell-positive' : 'cell-negative'}">
+                            ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
+                        </td>
+                        <td>${formatVolume(row.volume)}</td>
+                        <td class="${isLowFloat ? 'cell-positive' : ''}">${formatFloat(floatShares)}</td>
+                        <td>${(row.rvol || 0).toFixed(1)}x</td>
+                        <td>${(row.velocity || 0).toFixed(2)}</td>
+                        <td class="cell-hod ${isAtHOD ? 'hod-hit' : ''}">
+                            $${(row.high || 0).toFixed(2)}
+                            ${isAtHOD ? '<span class="hod-badge">HOD!</span>' : ''}
+                        </td>
+                        <td><span class="cell-score ${getScoreClass(row.ai_score || 0)}">${(row.ai_score || 0).toFixed(2)}</span></td>
+                    </tr>
+                `}).join('');
+            }
         }
 
         // Format volume
@@ -1162,6 +1260,13 @@
             if (floatM >= 1000) return (floatM / 1000).toFixed(1) + 'B';
             if (floatM >= 1) return floatM.toFixed(1) + 'M';
             return (floatM * 1000).toFixed(0) + 'K';
+        }
+
+        // Format market cap (in millions)
+        function formatMarketCap(mcM) {
+            if (!mcM || mcM === 0) return '-';
+            if (mcM >= 1000) return '$' + (mcM / 1000).toFixed(1) + 'B';
+            return '$' + mcM.toFixed(0) + 'M';
         }
 
         // Get score class
@@ -1199,6 +1304,8 @@
             editingPanelId = null;
             document.getElementById('panelModalTitle').textContent = 'Add Scanner Panel';
             document.getElementById('panelName').value = '';
+            document.getElementById('panelSource').value = 'scanner';
+            toggleSourceOptions();
             document.getElementById('filterMinPrice').value = '';
             document.getElementById('filterMaxPrice').value = '';
             document.getElementById('filterMinVolume').value = '';
@@ -1221,6 +1328,7 @@
 
         function savePanel() {
             const name = document.getElementById('panelName').value || 'Scanner';
+            const source = document.getElementById('panelSource').value;
             const profile = document.getElementById('panelProfile').value;
 
             const filters = {
@@ -1245,6 +1353,7 @@
                 const panel = panels.find(p => p.id === editingPanelId);
                 if (panel) {
                     panel.name = name;
+                    panel.source = source;
                     panel.profile = profile;
                     panel.filters = filters;
                     panel.sortBy = sortBy;
@@ -1255,6 +1364,7 @@
                 panels.push({
                     id: generateId(),
                     name,
+                    source,
                     profile,
                     filters,
                     sortBy,
@@ -1285,7 +1395,9 @@
             editingPanelId = contextPanelId;
             document.getElementById('panelModalTitle').textContent = 'Edit Scanner Panel';
             document.getElementById('panelName').value = panel.name;
-            document.getElementById('panelProfile').value = panel.profile;
+            document.getElementById('panelSource').value = panel.source || 'scanner';
+            toggleSourceOptions();
+            document.getElementById('panelProfile').value = panel.profile || '';
             document.getElementById('filterMinPrice').value = panel.filters?.minPrice || '';
             document.getElementById('filterMaxPrice').value = panel.filters?.maxPrice || '';
             document.getElementById('filterMinVolume').value = panel.filters?.minVolume || '';
