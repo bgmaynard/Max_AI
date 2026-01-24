@@ -151,6 +151,21 @@
             gap: 8px;
         }
 
+        .panel-title .panel-name {
+            color: var(--text-primary);
+        }
+
+        .panel-title .panel-profile {
+            font-size: 10px;
+            font-weight: 400;
+            color: var(--accent-blue);
+            background: rgba(88, 166, 255, 0.15);
+            padding: 2px 8px;
+            border-radius: 10px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
         .panel-title .count {
             font-size: 11px;
             font-weight: 400;
@@ -854,7 +869,8 @@
                 <div class="panel" data-panel-id="${panel.id}">
                     <div class="panel-header">
                         <div class="panel-title">
-                            ${panel.name}
+                            <span class="panel-name">${panel.name}</span>
+                            <span class="panel-profile">${panel.profile.replace(/_/g, ' ')}</span>
                             <span class="count" id="count-${panel.id}">0</span>
                         </div>
                         <div class="panel-actions">

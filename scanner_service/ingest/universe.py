@@ -37,6 +37,31 @@ SEED_UNIVERSE = [
     "PLTR", "SOFI", "RIVN", "LCID", "NIO", "COIN", "HOOD", "RBLX", "SNOW", "DKNG",
     "ROKU", "SQ", "SHOP", "MELI", "SE", "PINS", "SNAP", "TWLO", "ZM", "DOCU",
 
+    # Small Cap / Momentum / Day Trading Favorites
+    "SOUN", "SMCI", "IONQ", "RGTI", "QUBT", "KULR", "LUNR", "RKLB", "ASTS", "MNTS",
+    "APLD", "MARA", "RIOT", "CLSK", "BITF", "HUT", "WULF", "CIFR", "CORZ", "BTBT",
+    "BBAI", "BFRG", "GEVO", "PLUG", "FCEL", "BE", "BLNK", "CHPT", "EVGO", "DCFC",
+    "DNA", "CRSP", "BEAM", "EDIT", "NTLA", "VERV", "RXRX", "SDGR", "TALK", "HIMS",
+    "NKLA", "GOEV", "FFIE", "WKHS", "RIDE", "FSR", "PSNY", "VFS", "PTRA", "LEV",
+    "SNDL", "TLRY", "CGC", "ACB", "CRON", "HEXO", "OGI", "GRWG", "CURLF", "TCNNF",
+    "GME", "AMC", "BBBY", "BB", "EXPR", "KOSS", "CLOV", "WISH", "WKME", "OPEN",
+    "UPST", "AFRM", "LMND", "ROOT", "SKLZ", "FUBO", "GENI", "DNUT", "BZFD", "COUR",
+    "PATH", "AI", "BIGC", "FVRR", "ETSY", "CHWY", "W", "CVNA", "DASH", "ABNB",
+    "GRAB", "CPNG", "GLBE", "DLO", "PAYO", "BILL", "PCOR", "GDRX", "HEPS", "LFST",
+
+    # Biotech Small Caps (High Volatility)
+    "SAVA", "SRPT", "RARE", "BLUE", "SGMO", "FATE", "KYMR", "TGTX", "IMVT", "RVMD",
+    "ARQT", "BCYC", "XENE", "CRNX", "KRYS", "ALEC", "TVTX", "GTHX", "KROS", "ADVM",
+    "RLAY", "PCRX", "RCKT", "FOLD", "VCEL", "ORIC", "PHAT", "AKRO", "ANNX", "DAWN",
+
+    # Speculative / Recent IPOs / SPACs
+    "HOOD", "RBAC", "CFVI", "DWAC", "PHUN", "MARK", "BKKT", "SOFI", "DNA", "JOBY",
+    "EVTL", "LILM", "ACHR", "BLDE", "SPCE", "ASTR", "RDW", "VORB", "IRDM", "BKSY",
+
+    # Chinese ADRs (High Volume)
+    "BABA", "JD", "PDD", "BIDU", "NTES", "BILI", "TME", "XPEV", "LI", "ZK",
+    "FUTU", "TIGR", "DIDI", "TAL", "EDU", "VNET", "KC", "YMM", "TUYA", "DOYU",
+
     # ETFs for reference
     "SPY", "QQQ", "IWM", "DIA", "VTI", "ARKK", "XLF", "XLE", "XLK", "SOXL",
 ]
