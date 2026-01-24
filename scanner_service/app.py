@@ -619,7 +619,7 @@ async def get_finviz_top_gainers(
     max_price: float = Query(20.0, description="Maximum stock price"),
     min_change: float = Query(0.0, description="Minimum % change"),
     max_float: Optional[float] = Query(None, description="Maximum float in millions"),
-    limit: int = Query(50, ge=1, le=200, description="Max results"),
+    limit: int = Query(200, ge=1, le=500, description="Max results"),
     auto_add: bool = Query(True, description="Auto-add new symbols to scanner universe"),
 ):
     """
