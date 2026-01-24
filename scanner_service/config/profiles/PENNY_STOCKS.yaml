@@ -1,0 +1,17 @@
+name: PENNY_STOCKS
+description: Sub-$5 stocks with high volume and momentum
+enabled: true
+conditions: []
+weights:
+  change_pct: 1.5
+  velocity: 1.0
+  rvol: 1.5
+  hod_proximity: 1.0
+  spread: 0.3
+  volume: 1.0
+min_price: 0.10
+max_price: 5.0
+min_volume: 100000
+alert_enabled: true
+alert_sound: null
+alert_threshold: 0.6

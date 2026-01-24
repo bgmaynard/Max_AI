@@ -9,9 +9,9 @@ weights:
   hod_proximity: 1.0
   spread: 0.5
   volume: 0.5
-min_price: 5.0
+min_price: 0.10
 max_price: 500.0
-min_volume: 100000
+min_volume: 50000
 alert_enabled: false
 alert_sound: null
 alert_threshold: 0.7

@@ -62,6 +62,19 @@ SEED_UNIVERSE = [
     "BABA", "JD", "PDD", "BIDU", "NTES", "BILI", "TME", "XPEV", "LI", "ZK",
     "FUTU", "TIGR", "DIDI", "TAL", "EDU", "VNET", "KC", "YMM", "TUYA", "DOYU",
 
+    # Penny Stocks / Sub-$5 High Volume Day Trading
+    "MULN", "VXRT", "BNGO", "SENS", "CTRM", "NAKD", "ZOM", "GNUS", "SHIP", "IDEX",
+    "OCGN", "ATOS", "CLOV", "PROG", "BBIG", "ATER", "SPRT", "XELA", "MMAT", "TRCH",
+    "CEI", "FAMI", "KPLT", "ANY", "BTTX", "SOBR", "VISL", "SINT", "EEIQ", "BIOR",
+    "IMPP", "INDO", "HCDI", "ENSV", "MEGL", "GNS", "TPST", "ATNF", "VERB", "KAVL",
+    "BOXD", "BBAI", "PRTY", "NILE", "GOVX", "VERU", "ADTX", "AGRI", "TIRX", "CXAI",
+    "SXTC", "JSPR", "TOP", "ATXI", "PIXY", "UTRS", "BHAT", "JZXN", "MGAM", "PETZ",
+    "BTCS", "APRE", "YGTY", "EVOK", "MBOT", "RSLS", "CNET", "FBIO", "BFRG", "LQDA",
+    "CRGE", "DRUG", "ALLR", "CRBP", "MYSZ", "SEEL", "OTRK", "IMRN", "ZKIN", "PCT",
+
+    # OTC/Pink Sheet Popular (if available via Schwab)
+    "EEENF", "OZSC", "DPLS", "MINE", "HCMC", "HMBL", "TSNP", "AITX", "GNUS", "BBRW",
+
     # ETFs for reference
     "SPY", "QQQ", "IWM", "DIA", "VTI", "ARKK", "XLF", "XLE", "XLK", "SOXL",
 ]
@@ -121,20 +134,22 @@ class UniverseManager:
             if quote.last_price == 0:
                 continue
 
-            # Volume filter
-            if quote.volume < 50000:
+            # Volume filter (higher for penny stocks)
+            min_volume = 100000 if quote.last_price < 1.0 else 50000
+            if quote.volume < min_volume:
                 continue
 
-            # Price filter (avoid penny stocks and extremely high-priced)
-            if quote.last_price < 1.0 or quote.last_price > 1000:
+            # Price filter (allow penny stocks down to $0.10)
+            if quote.last_price < 0.10 or quote.last_price > 1000:
                 continue
 
             # Must have bid/ask (liquid)
             if quote.bid == 0 or quote.ask == 0:
                 continue
 
-            # Spread filter (avoid illiquid)
-            if quote.spread > 2.0:  # > 2% spread
+            # Spread filter (more lenient for penny stocks)
+            max_spread = 5.0 if quote.last_price < 1.0 else 2.0
+            if quote.spread > max_spread:
                 continue
 
             # Some activity criteria
