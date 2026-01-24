@@ -78,12 +78,15 @@ def _fetch_finviz_gainers(max_price: float) -> list[dict]:
     try:
         from finvizfinance.screener.overview import Overview
 
-        # Use Overview screener first to get all top gainers
+        # Use Overview screener to get all top gainers
         foverview = Overview()
-        foverview.set_filter(signal='Top Gainers')
 
-        # Get up to 500 rows (default is 20)
-        df = foverview.screener_view(order='Change', limit=500, ascend=False)
+        # Set signal for top gainers
+        foverview.set_filter(signal='Top Gainers', filters_dict={})
+
+        # Get the screener view with proper ordering by change %
+        # order parameter: 'Change' column, ascend=False for descending (biggest gainers first)
+        df = foverview.screener_view(order='Change', ascend=False)
 
         if df is None or df.empty:
             logger.warning("Finviz returned empty dataframe")
@@ -93,46 +96,53 @@ def _fetch_finviz_gainers(max_price: float) -> list[dict]:
 
         import math
 
+        def safe_float(val, default=0.0):
+            """Convert to float, handling NaN and invalid values."""
+            try:
+                if val is None:
+                    return default
+                if isinstance(val, str):
+                    val = val.replace('%', '').replace(',', '').strip()
+                    if not val or val == '-':
+                        return default
+                f = float(val)
+                return default if math.isnan(f) or math.isinf(f) else f
+            except:
+                return default
+
+        def safe_int(val, default=0):
+            """Convert to int, handling invalid values."""
+            try:
+                if val is None:
+                    return default
+                if isinstance(val, str):
+                    val = _parse_number(val)
+                return int(val or default)
+            except:
+                return default
+
         results = []
         for _, row in df.iterrows():
             try:
-                # Parse change (can be like "22.66%" or decimal)
-                change = row.get('Change', 0)
-                if isinstance(change, str):
-                    change = float(change.replace('%', '').replace(',', '')) / 100
-                change_pct = change * 100 if abs(change) < 1 else change
-
-                # Parse price
-                price = row.get('Price', 0)
-                if isinstance(price, str):
-                    price = float(price.replace(',', ''))
-                price = float(price or 0)
-
-                # Parse volume
-                volume = row.get('Volume', 0)
-                if isinstance(volume, str):
-                    volume = _parse_number(volume)
-                volume = int(volume or 0)
-
-                # Parse market cap
-                market_cap = _parse_number(row.get('Market Cap', 0)) / 1_000_000
-
-                # Handle NaN
-                if math.isnan(change_pct):
-                    change_pct = 0
-                if math.isnan(price):
-                    price = 0
-
                 ticker = row.get('Ticker', '')
                 if not ticker:
                     continue
+
+                # Parse change (can be like "22.66%" or decimal)
+                change = safe_float(row.get('Change', 0))
+                change_pct = change * 100 if abs(change) < 1 else change
+
+                # Parse other fields with safe conversion
+                price = safe_float(row.get('Price', 0))
+                volume = safe_int(row.get('Volume', 0))
+                market_cap = safe_float(_parse_number(row.get('Market Cap', 0))) / 1_000_000
 
                 results.append({
                     'symbol': ticker,
                     'price': price,
                     'change_pct': change_pct,
                     'volume': volume,
-                    'float_shares': 0,  # Will be enriched later if needed
+                    'float_shares': 0,
                     'shares_outstanding': 0,
                     'avg_volume': 0,
                     'market_cap': market_cap,
@@ -140,14 +150,17 @@ def _fetch_finviz_gainers(max_price: float) -> list[dict]:
                     'insider_own': 0,
                     'inst_own': 0,
                     'source': 'finviz',
-                    'company': row.get('Company', ''),
-                    'sector': row.get('Sector', ''),
+                    'company': str(row.get('Company', '') or ''),
+                    'sector': str(row.get('Sector', '') or ''),
                 })
             except Exception as e:
                 logger.warning(f"Error parsing Finviz row {row.get('Ticker', '?')}: {e}")
                 continue
 
-        logger.info(f"Fetched {len(results)} top gainers from Finviz")
+        # Sort by change_pct descending (biggest gainers first)
+        results.sort(key=lambda x: x.get('change_pct', 0), reverse=True)
+
+        logger.info(f"Fetched {len(results)} top gainers from Finviz (sorted by change %)")
         return results
 
     except Exception as e:
