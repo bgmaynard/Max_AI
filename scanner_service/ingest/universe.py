@@ -1,0 +1,157 @@
+"""Universe management - symbol filtering and narrowing."""
+
+import logging
+from typing import Optional
+from datetime import datetime, time
+
+from scanner_service.settings import get_settings
+from scanner_service.schemas.market_snapshot import Quote
+
+logger = logging.getLogger(__name__)
+
+
+# Core NASDAQ/NYSE actively traded stocks (seed universe)
+SEED_UNIVERSE = [
+    # Tech mega-caps
+    "AAPL", "MSFT", "GOOGL", "GOOG", "AMZN", "NVDA", "META", "TSLA", "AMD", "INTC",
+    "AVGO", "ORCL", "CRM", "ADBE", "CSCO", "QCOM", "TXN", "NOW", "AMAT", "MU",
+    "LRCX", "KLAC", "SNPS", "CDNS", "MRVL", "ADI", "NXPI", "PANW", "CRWD", "FTNT",
+
+    # Retail / Consumer
+    "WMT", "COST", "HD", "TGT", "LOW", "SBUX", "MCD", "NKE", "LULU", "DECK",
+
+    # Finance
+    "JPM", "BAC", "WFC", "GS", "MS", "C", "BLK", "SCHW", "AXP", "V", "MA", "PYPL",
+
+    # Healthcare / Biotech
+    "JNJ", "UNH", "PFE", "ABBV", "MRK", "LLY", "BMY", "AMGN", "GILD", "BIIB",
+    "MRNA", "REGN", "VRTX", "ISRG", "DXCM", "ILMN",
+
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "EOG", "PXD", "OXY", "DVN", "HAL", "MPC",
+
+    # Industrial
+    "CAT", "DE", "HON", "UPS", "FDX", "BA", "RTX", "LMT", "GE", "MMM",
+
+    # Popular momentum/meme stocks
+    "PLTR", "SOFI", "RIVN", "LCID", "NIO", "COIN", "HOOD", "RBLX", "SNOW", "DKNG",
+    "ROKU", "SQ", "SHOP", "MELI", "SE", "PINS", "SNAP", "TWLO", "ZM", "DOCU",
+
+    # ETFs for reference
+    "SPY", "QQQ", "IWM", "DIA", "VTI", "ARKK", "XLF", "XLE", "XLK", "SOXL",
+]
+
+
+class UniverseManager:
+    """
+    Manages the symbol universe for scanning.
+
+    Implements universe narrowing to focus on active candidates
+    rather than brute-force scanning all symbols.
+    """
+
+    def __init__(self):
+        self.settings = get_settings()
+        self._universe: list[str] = SEED_UNIVERSE.copy()
+        self._active_candidates: list[str] = []
+        self._last_refresh: Optional[datetime] = None
+
+    @property
+    def universe(self) -> list[str]:
+        """Get full universe of symbols."""
+        return self._universe
+
+    @property
+    def candidates(self) -> list[str]:
+        """Get narrowed active candidates."""
+        return self._active_candidates or self._universe[: self.settings.max_watch_symbols]
+
+    def add_symbols(self, symbols: list[str]) -> None:
+        """Add symbols to the universe."""
+        for symbol in symbols:
+            symbol = symbol.upper().strip()
+            if symbol and symbol not in self._universe:
+                self._universe.append(symbol)
+        logger.info(f"Universe now contains {len(self._universe)} symbols")
+
+    def remove_symbols(self, symbols: list[str]) -> None:
+        """Remove symbols from the universe."""
+        symbols_upper = {s.upper().strip() for s in symbols}
+        self._universe = [s for s in self._universe if s not in symbols_upper]
+
+    def narrow_universe(self, quotes: dict[str, Quote]) -> list[str]:
+        """
+        Narrow universe to active candidates based on real-time data.
+
+        Criteria for narrowing:
+        - Volume > minimum threshold
+        - Price within acceptable range
+        - Has recent activity (bid/ask present)
+        - Relative volume indicates interest
+        """
+        candidates = []
+
+        for symbol, quote in quotes.items():
+            # Skip if no meaningful data
+            if quote.last_price == 0:
+                continue
+
+            # Volume filter
+            if quote.volume < 50000:
+                continue
+
+            # Price filter (avoid penny stocks and extremely high-priced)
+            if quote.last_price < 1.0 or quote.last_price > 1000:
+                continue
+
+            # Must have bid/ask (liquid)
+            if quote.bid == 0 or quote.ask == 0:
+                continue
+
+            # Spread filter (avoid illiquid)
+            if quote.spread > 2.0:  # > 2% spread
+                continue
+
+            # Some activity criteria
+            has_movement = abs(quote.change_pct) > 0.1  # At least 0.1% move
+            has_volume = quote.rvol > 0.3  # At least 30% of avg volume so far
+
+            if has_movement or has_volume:
+                candidates.append(symbol)
+
+        # Sort by activity (change % * rvol) and limit
+        candidates.sort(
+            key=lambda s: abs(quotes[s].change_pct) * max(quotes[s].rvol, 0.1),
+            reverse=True,
+        )
+
+        max_symbols = self.settings.max_watch_symbols
+        self._active_candidates = candidates[:max_symbols]
+        self._last_refresh = datetime.utcnow()
+
+        logger.info(
+            f"Narrowed universe: {len(quotes)} -> {len(self._active_candidates)} candidates"
+        )
+        return self._active_candidates
+
+    def is_market_hours(self) -> bool:
+        """Check if current time is within market hours (EST)."""
+        now = datetime.utcnow()
+        # Convert to EST (UTC-5, ignoring DST for simplicity)
+        est_hour = (now.hour - 5) % 24
+
+        market_open = time(9, 30)
+        market_close = time(16, 0)
+
+        current_time = time(est_hour, now.minute)
+        return market_open <= current_time <= market_close
+
+    def get_premarket_movers(self, quotes: dict[str, Quote], limit: int = 50) -> list[str]:
+        """Get top premarket movers by gap percentage."""
+        movers = []
+        for symbol, quote in quotes.items():
+            if abs(quote.gap_pct) > 1.0 and quote.volume > 10000:
+                movers.append((symbol, quote.gap_pct))
+
+        movers.sort(key=lambda x: abs(x[1]), reverse=True)
+        return [s for s, _ in movers[:limit]]

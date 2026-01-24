@@ -1,0 +1,28 @@
+name: GAPPERS
+description: Stocks gapping up/down significantly from previous close
+
+enabled: true
+
+conditions:
+  - field: gap_pct
+    operator: gte
+    value: 3.0
+  - field: rvol
+    operator: gte
+    value: 1.5
+
+weights:
+  change_pct: 1.5
+  velocity: 0.8
+  rvol: 2.0
+  hod_proximity: 0.5
+  spread: 0.5
+  volume: 1.0
+
+min_price: 1.0
+max_price: 200.0
+min_volume: 150000
+
+alert_enabled: true
+alert_sound: gap_alert.wav
+alert_threshold: 0.70

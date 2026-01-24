@@ -1,0 +1,31 @@
+name: HOD_BREAK
+description: Stocks breaking their high of day with momentum
+
+enabled: true
+
+conditions:
+  - field: hod_proximity
+    operator: gte
+    value: 0.95
+  - field: change_pct
+    operator: gte
+    value: 1.0
+  - field: velocity
+    operator: gt
+    value: 0.1
+
+weights:
+  change_pct: 1.0
+  velocity: 1.5
+  rvol: 1.0
+  hod_proximity: 3.0
+  spread: 0.3
+  volume: 0.5
+
+min_price: 5.0
+max_price: 500.0
+min_volume: 100000
+
+alert_enabled: true
+alert_sound: hod_break.wav
+alert_threshold: 0.80
