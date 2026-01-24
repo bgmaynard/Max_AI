@@ -106,31 +106,36 @@
         .btn-sm { padding: 4px 8px; font-size: 11px; }
         .btn-icon { padding: 6px; }
 
-        /* Dashboard Grid */
+        /* Dashboard - Free-form layout */
         .dashboard {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
-            gap: 12px;
+            position: relative;
             padding: 12px;
             height: calc(100vh - 50px);
             overflow: auto;
         }
 
-        .dashboard.layout-1 { grid-template-columns: 1fr; }
-        .dashboard.layout-2 { grid-template-columns: 1fr 1fr; }
-        .dashboard.layout-3 { grid-template-columns: 1fr 1fr 1fr; }
-        .dashboard.layout-2-1 { grid-template-columns: 2fr 1fr; }
-        .dashboard.layout-1-2 { grid-template-columns: 1fr 2fr; }
-
         /* Panel */
         .panel {
+            position: absolute;
             background: var(--bg-secondary);
             border: 1px solid var(--border-color);
             border-radius: 8px;
             display: flex;
             flex-direction: column;
-            min-height: 300px;
-            max-height: calc(100vh - 74px);
+            min-width: 400px;
+            min-height: 250px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            transition: box-shadow 0.2s;
+        }
+
+        .panel:hover {
+            box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+        }
+
+        .panel.dragging {
+            opacity: 0.9;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+            z-index: 100;
         }
 
         .panel-header {
@@ -141,6 +146,23 @@
             align-items: center;
             background: var(--bg-tertiary);
             border-radius: 8px 8px 0 0;
+            cursor: move;
+        }
+
+        /* Resize handle */
+        .resize-handle {
+            position: absolute;
+            bottom: 0;
+            right: 0;
+            width: 16px;
+            height: 16px;
+            cursor: se-resize;
+            background: linear-gradient(135deg, transparent 50%, var(--border-color) 50%);
+            border-radius: 0 0 8px 0;
+        }
+
+        .resize-handle:hover {
+            background: linear-gradient(135deg, transparent 50%, var(--accent-blue) 50%);
         }
 
         .panel-title {
@@ -824,6 +846,13 @@
         let editingPanelId = null;
         let contextPanelId = null;
 
+        // Drag/resize state
+        let dragState = null;
+        let resizeState = null;
+
+        // Data cache for smooth updates
+        const panelDataCache = new Map();
+
         // Initialize
         document.addEventListener('DOMContentLoaded', async () => {
             await loadProfiles();
@@ -848,6 +877,125 @@
                     document.getElementById('contextMenu').classList.remove('active');
                 }
             });
+
+            // Global mouse events for drag/resize
+            document.addEventListener('mousemove', handleMouseMove);
+            document.addEventListener('mouseup', handleMouseUp);
+        }
+
+        // Calculate default position for new panels
+        function getDefaultPosition(index) {
+            const cols = Math.ceil(Math.sqrt(panels.length));
+            const row = Math.floor(index / cols);
+            const col = index % cols;
+            return {
+                x: 12 + col * 620,
+                y: 12 + row * 420
+            };
+        }
+
+        // Start dragging a panel
+        function startDrag(event, panelId) {
+            // Don't drag if clicking on interactive elements
+            if (event.target.closest('button, input, select, .resize-handle')) return;
+
+            const panelEl = document.querySelector(`[data-panel-id="${panelId}"]`);
+            if (!panelEl) return;
+
+            event.preventDefault();
+            panelEl.classList.add('dragging');
+
+            // Bring to front
+            document.querySelectorAll('.panel').forEach(p => p.style.zIndex = '1');
+            panelEl.style.zIndex = '100';
+
+            dragState = {
+                panelId,
+                startX: event.clientX,
+                startY: event.clientY,
+                origX: parseInt(panelEl.style.left) || 0,
+                origY: parseInt(panelEl.style.top) || 0
+            };
+        }
+
+        // Start resizing a panel
+        function startResize(event, panelId) {
+            event.preventDefault();
+            event.stopPropagation();
+
+            const panelEl = document.querySelector(`[data-panel-id="${panelId}"]`);
+            if (!panelEl) return;
+
+            resizeState = {
+                panelId,
+                startX: event.clientX,
+                startY: event.clientY,
+                origWidth: panelEl.offsetWidth,
+                origHeight: panelEl.offsetHeight
+            };
+        }
+
+        // Handle mouse move for drag/resize
+        function handleMouseMove(event) {
+            if (dragState) {
+                const panelEl = document.querySelector(`[data-panel-id="${dragState.panelId}"]`);
+                if (!panelEl) return;
+
+                const dx = event.clientX - dragState.startX;
+                const dy = event.clientY - dragState.startY;
+
+                panelEl.style.left = Math.max(0, dragState.origX + dx) + 'px';
+                panelEl.style.top = Math.max(0, dragState.origY + dy) + 'px';
+            }
+
+            if (resizeState) {
+                const panelEl = document.querySelector(`[data-panel-id="${resizeState.panelId}"]`);
+                if (!panelEl) return;
+
+                const dx = event.clientX - resizeState.startX;
+                const dy = event.clientY - resizeState.startY;
+
+                const newWidth = Math.max(400, resizeState.origWidth + dx);
+                const newHeight = Math.max(250, resizeState.origHeight + dy);
+
+                panelEl.style.width = newWidth + 'px';
+                panelEl.style.height = newHeight + 'px';
+            }
+        }
+
+        // Handle mouse up - end drag/resize and save positions
+        function handleMouseUp(event) {
+            if (dragState) {
+                const panelEl = document.querySelector(`[data-panel-id="${dragState.panelId}"]`);
+                if (panelEl) {
+                    panelEl.classList.remove('dragging');
+
+                    // Save position to panel data
+                    const panel = panels.find(p => p.id === dragState.panelId);
+                    if (panel) {
+                        panel.position = {
+                            x: parseInt(panelEl.style.left) || 0,
+                            y: parseInt(panelEl.style.top) || 0
+                        };
+                    }
+                }
+                dragState = null;
+            }
+
+            if (resizeState) {
+                const panelEl = document.querySelector(`[data-panel-id="${resizeState.panelId}"]`);
+                if (panelEl) {
+                    // Save size to panel data
+                    const panel = panels.find(p => p.id === resizeState.panelId);
+                    if (panel) {
+                        panel.size = {
+                            width: panelEl.offsetWidth,
+                            height: panelEl.offsetHeight
+                        };
+                    }
+                }
+                resizeState = null;
+            }
         }
 
         // Load profiles from API
@@ -968,8 +1116,14 @@
                 <th onclick="sortPanel('${panel.id}', 'ai_score')">AI</th>
             `;
 
+            // Get saved position/size or calculate default
+            const pos = panel.position || getDefaultPosition(panels.indexOf(panel));
+            const size = panel.size || { width: 600, height: 400 };
+
             return `
-                <div class="panel" data-panel-id="${panel.id}">
+                <div class="panel" data-panel-id="${panel.id}"
+                     style="left: ${pos.x}px; top: ${pos.y}px; width: ${size.width}px; height: ${size.height}px;"
+                     onmousedown="startDrag(event, '${panel.id}')">
                     <div class="panel-header">
                         <div class="panel-title">
                             <span class="panel-name">${panel.name}</span>
@@ -977,13 +1131,13 @@
                             <span class="count" id="count-${panel.id}">0</span>
                         </div>
                         <div class="panel-actions">
-                            <button class="btn btn-sm btn-icon tooltip" data-tooltip="Refresh" onclick="loadPanelData('${panel.id}')">
+                            <button class="btn btn-sm btn-icon tooltip" data-tooltip="Refresh" onclick="event.stopPropagation(); loadPanelData('${panel.id}')">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
                                     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
                                 </svg>
                             </button>
-                            <button class="btn btn-sm btn-icon tooltip" data-tooltip="Settings" onclick="showContextMenu(event, '${panel.id}')">
+                            <button class="btn btn-sm btn-icon tooltip" data-tooltip="Settings" onclick="event.stopPropagation(); showContextMenu(event, '${panel.id}')">
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>
                                 </svg>
@@ -1003,6 +1157,7 @@
                             </tbody>
                         </table>
                     </div>
+                    <div class="resize-handle" onmousedown="startResize(event, '${panel.id}')"></div>
                 </div>
             `;
         }
@@ -1179,10 +1334,14 @@
             loadPanelData(panelId);
         }
 
-        // Render panel table
+        // Render panel table - updates in place to prevent blinking
         function renderPanelTable(panelId, rows, source) {
             const tbody = document.getElementById(`tbody-${panelId}`);
             const isFinviz = source === 'finviz';
+
+            // Get previous data for comparison
+            const prevData = panelDataCache.get(panelId) || [];
+            panelDataCache.set(panelId, rows);
 
             if (rows.length === 0) {
                 tbody.innerHTML = `
@@ -1196,55 +1355,116 @@
                 return;
             }
 
-            if (isFinviz) {
-                // Finviz table rows
-                tbody.innerHTML = rows.map((row, i) => {
-                    const floatShares = row.float_shares || 0;
-                    const isLowFloat = floatShares > 0 && floatShares < 20;
-                    const isVeryLowFloat = floatShares > 0 && floatShares < 5;
-                    return `
-                    <tr class="${isVeryLowFloat ? 'at-hod' : ''}">
-                        <td>${i + 1}</td>
-                        <td class="cell-symbol" onclick="showSymbolDetails('${row.symbol}')">${row.symbol}</td>
-                        <td class="cell-price">$${row.price.toFixed(2)}</td>
-                        <td class="${row.change_pct >= 0 ? 'cell-positive' : 'cell-negative'}">
-                            ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
-                        </td>
-                        <td>${formatVolume(row.volume)}</td>
-                        <td class="${isLowFloat ? 'cell-positive' : ''}" style="${isVeryLowFloat ? 'font-weight:bold' : ''}">${formatFloat(floatShares)}</td>
-                        <td>${formatVolume(row.avg_volume)}</td>
-                        <td>${row.short_float || '-'}</td>
-                        <td>${formatMarketCap(row.market_cap)}</td>
-                    </tr>
-                `}).join('');
-            } else {
-                // Scanner table rows
-                tbody.innerHTML = rows.map((row, i) => {
-                    const isAtHOD = row.hod_proximity >= 0.98;
-                    const isNearHOD = row.hod_proximity >= 0.95 && row.hod_proximity < 0.98;
-                    const hodClass = isAtHOD ? 'at-hod' : (isNearHOD ? 'near-hod' : '');
-                    const floatShares = row.float_shares || 0;
-                    const isLowFloat = floatShares > 0 && floatShares < 20;
-                    return `
-                    <tr class="${hodClass}">
-                        <td>${i + 1}</td>
-                        <td class="cell-symbol" onclick="showSymbolDetails('${row.symbol}')">${row.symbol}</td>
-                        <td class="cell-price">$${row.last_price.toFixed(2)}</td>
-                        <td class="${row.change_pct >= 0 ? 'cell-positive' : 'cell-negative'}">
-                            ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
-                        </td>
-                        <td>${formatVolume(row.volume)}</td>
-                        <td class="${isLowFloat ? 'cell-positive' : ''}">${formatFloat(floatShares)}</td>
-                        <td>${(row.rvol || 0).toFixed(1)}x</td>
-                        <td>${(row.velocity || 0).toFixed(2)}</td>
-                        <td class="cell-hod ${isAtHOD ? 'hod-hit' : ''}">
-                            $${(row.high || 0).toFixed(2)}
-                            ${isAtHOD ? '<span class="hod-badge">HOD!</span>' : ''}
-                        </td>
-                        <td><span class="cell-score ${getScoreClass(row.ai_score || 0)}">${(row.ai_score || 0).toFixed(2)}</span></td>
-                    </tr>
-                `}).join('');
-            }
+            // Build a map of existing rows by symbol
+            const existingRows = new Map();
+            tbody.querySelectorAll('tr[data-symbol]').forEach(tr => {
+                existingRows.set(tr.dataset.symbol, tr);
+            });
+
+            // Create new tbody content
+            const newSymbols = new Set(rows.map(r => r.symbol));
+
+            // Remove rows for symbols no longer in data
+            existingRows.forEach((tr, symbol) => {
+                if (!newSymbols.has(symbol)) {
+                    tr.remove();
+                }
+            });
+
+            // Update or create rows
+            rows.forEach((row, i) => {
+                let tr = existingRows.get(row.symbol);
+                const isNew = !tr;
+
+                if (isNew) {
+                    tr = document.createElement('tr');
+                    tr.dataset.symbol = row.symbol;
+                }
+
+                // Check if data changed
+                const prevRow = prevData.find(r => r.symbol === row.symbol);
+                const priceChanged = prevRow && (
+                    (row.last_price || row.price) !== (prevRow.last_price || prevRow.price)
+                );
+
+                if (isFinviz) {
+                    updateFinvizRow(tr, row, i, priceChanged);
+                } else {
+                    updateScannerRow(tr, row, i, priceChanged);
+                }
+
+                // Position the row correctly
+                const currentIndex = Array.from(tbody.children).indexOf(tr);
+                if (currentIndex !== i) {
+                    if (i === 0) {
+                        tbody.prepend(tr);
+                    } else {
+                        const prevTr = tbody.children[i - 1];
+                        if (prevTr) {
+                            prevTr.after(tr);
+                        } else {
+                            tbody.appendChild(tr);
+                        }
+                    }
+                }
+
+                // Flash effect for price changes
+                if (priceChanged && !isNew) {
+                    tr.classList.add('highlight');
+                    setTimeout(() => tr.classList.remove('highlight'), 500);
+                }
+            });
+        }
+
+        // Update a Finviz row in place
+        function updateFinvizRow(tr, row, index, priceChanged) {
+            const floatShares = row.float_shares || 0;
+            const isLowFloat = floatShares > 0 && floatShares < 20;
+            const isVeryLowFloat = floatShares > 0 && floatShares < 5;
+
+            tr.className = isVeryLowFloat ? 'at-hod' : '';
+
+            tr.innerHTML = `
+                <td>${index + 1}</td>
+                <td class="cell-symbol" onclick="showSymbolDetails('${row.symbol}')">${row.symbol}</td>
+                <td class="cell-price">$${row.price.toFixed(2)}</td>
+                <td class="${row.change_pct >= 0 ? 'cell-positive' : 'cell-negative'}">
+                    ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
+                </td>
+                <td>${formatVolume(row.volume)}</td>
+                <td class="${isLowFloat ? 'cell-positive' : ''}" style="${isVeryLowFloat ? 'font-weight:bold' : ''}">${formatFloat(floatShares)}</td>
+                <td>${formatVolume(row.avg_volume)}</td>
+                <td>${row.short_float || '-'}</td>
+                <td>${formatMarketCap(row.market_cap)}</td>
+            `;
+        }
+
+        // Update a Scanner row in place
+        function updateScannerRow(tr, row, index, priceChanged) {
+            const isAtHOD = row.hod_proximity >= 0.98;
+            const isNearHOD = row.hod_proximity >= 0.95 && row.hod_proximity < 0.98;
+            const floatShares = row.float_shares || 0;
+            const isLowFloat = floatShares > 0 && floatShares < 20;
+
+            tr.className = isAtHOD ? 'at-hod' : (isNearHOD ? 'near-hod' : '');
+
+            tr.innerHTML = `
+                <td>${index + 1}</td>
+                <td class="cell-symbol" onclick="showSymbolDetails('${row.symbol}')">${row.symbol}</td>
+                <td class="cell-price">$${row.last_price.toFixed(2)}</td>
+                <td class="${row.change_pct >= 0 ? 'cell-positive' : 'cell-negative'}">
+                    ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
+                </td>
+                <td>${formatVolume(row.volume)}</td>
+                <td class="${isLowFloat ? 'cell-positive' : ''}">${formatFloat(floatShares)}</td>
+                <td>${(row.rvol || 0).toFixed(1)}x</td>
+                <td>${(row.velocity || 0).toFixed(2)}</td>
+                <td class="cell-hod ${isAtHOD ? 'hod-hit' : ''}">
+                    $${(row.high || 0).toFixed(2)}
+                    ${isAtHOD ? '<span class="hod-badge">HOD!</span>' : ''}
+                </td>
+                <td><span class="cell-score ${getScoreClass(row.ai_score || 0)}">${(row.ai_score || 0).toFixed(2)}</span></td>
+            `;
         }
 
         // Format volume

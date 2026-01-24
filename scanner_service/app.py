@@ -620,12 +620,14 @@ async def get_finviz_top_gainers(
     min_change: float = Query(0.0, description="Minimum % change"),
     max_float: Optional[float] = Query(None, description="Maximum float in millions"),
     limit: int = Query(50, ge=1, le=200, description="Max results"),
+    auto_add: bool = Query(True, description="Auto-add new symbols to scanner universe"),
 ):
     """
     Get top gainers from Finviz with float data.
 
     This endpoint fetches real-time top gainers from Finviz screener,
     including float, shares outstanding, and other ownership data.
+    New symbols are automatically added to the scanner universe.
     """
     try:
         results = await finviz_client.get_top_gainers(
@@ -634,6 +636,16 @@ async def get_finviz_top_gainers(
             max_float_millions=max_float,
             limit=limit,
         )
+
+        # Auto-add new symbols to universe
+        new_symbols = []
+        if auto_add and universe and results:
+            current = set(universe.universe)
+            new_symbols = [r['symbol'] for r in results if r['symbol'] not in current]
+            if new_symbols:
+                universe.add_symbols(new_symbols)
+                logger.info(f"Auto-added {len(new_symbols)} Finviz symbols to universe: {new_symbols}")
+
         return {
             "count": len(results),
             "filters": {
@@ -642,6 +654,7 @@ async def get_finviz_top_gainers(
                 "max_float": max_float,
             },
             "gainers": results,
+            "symbols_added": new_symbols,
         }
     except Exception as e:
         logger.error(f"Finviz fetch error: {e}")
@@ -656,6 +669,45 @@ async def get_finviz_quote(symbol: str):
     if result:
         return result
     raise HTTPException(status_code=404, detail=f"No Finviz data for {symbol}")
+
+
+# ============== Universe Management ==============
+
+@app.post("/universe/add")
+async def add_symbols_to_universe(symbols: list[str]):
+    """Add symbols to the scanner universe."""
+    if not universe:
+        raise HTTPException(status_code=500, detail="Universe not initialized")
+
+    symbols = [s.upper().strip() for s in symbols if s]
+    if not symbols:
+        return {"added": 0, "message": "No valid symbols provided"}
+
+    # Track which ones are new
+    current = set(universe.universe)
+    new_symbols = [s for s in symbols if s not in current]
+
+    if new_symbols:
+        universe.add_symbols(new_symbols)
+        logger.info(f"Added {len(new_symbols)} new symbols to universe: {new_symbols}")
+
+    return {
+        "added": len(new_symbols),
+        "new_symbols": new_symbols,
+        "total_universe": len(universe.universe),
+    }
+
+
+@app.get("/universe/symbols")
+async def get_universe_symbols():
+    """Get all symbols in the scanner universe."""
+    if not universe:
+        raise HTTPException(status_code=500, detail="Universe not initialized")
+
+    return {
+        "count": len(universe.universe),
+        "symbols": universe.universe,
+    }
 
 
 # ============== Main ==============
