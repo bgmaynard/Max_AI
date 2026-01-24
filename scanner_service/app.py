@@ -8,7 +8,10 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
+import urllib.parse
+import webbrowser
 
 from scanner_service.settings import get_settings
 from scanner_service.schemas.events import AlertEvent, AlertType, ScannerOutput, ScannerRow
@@ -401,6 +404,99 @@ async def websocket_scanner(
     finally:
         if profile in websocket_connections:
             websocket_connections[profile].remove(websocket)
+
+
+# ============== Auth (Schwab OAuth) ==============
+
+@app.get("/auth/status")
+async def auth_status():
+    """Check Schwab authentication status."""
+    return {
+        "authenticated": schwab_client.is_authenticated(),
+        "has_refresh_token": schwab_client._refresh_token is not None,
+        "token_expiry": schwab_client._token_expiry.isoformat() if schwab_client._token_expiry else None,
+    }
+
+
+@app.get("/auth/login")
+async def auth_login(open_browser: bool = Query(True, description="Open browser automatically")):
+    """
+    Start Schwab OAuth flow.
+
+    Returns the authorization URL. If open_browser=True, opens it automatically.
+    After logging in, Schwab will redirect to /auth/callback with the code.
+    """
+    # Build authorization URL
+    auth_url = "https://api.schwabapi.com/v1/oauth/authorize"
+    params = {
+        "response_type": "code",
+        "client_id": settings.schwab_client_id,
+        "redirect_uri": settings.schwab_redirect_uri,
+        "scope": "readonly",
+    }
+
+    full_url = f"{auth_url}?{urllib.parse.urlencode(params)}"
+
+    if open_browser:
+        try:
+            webbrowser.open(full_url)
+            logger.info("Opened browser for Schwab authentication")
+        except Exception as e:
+            logger.warning(f"Could not open browser: {e}")
+
+    return {
+        "status": "authorization_required",
+        "auth_url": full_url,
+        "instructions": [
+            "1. Open the auth_url in your browser (or it opened automatically)",
+            "2. Log in to your Schwab account",
+            "3. Authorize the application",
+            "4. You will be redirected to the callback URL",
+            "5. Copy the 'code' parameter from the URL",
+            "6. POST it to /auth/callback with {\"code\": \"YOUR_CODE\"}",
+        ],
+    }
+
+
+class AuthCallback(BaseModel):
+    """OAuth callback request."""
+    code: str
+
+
+@app.post("/auth/callback")
+async def auth_callback(data: AuthCallback):
+    """
+    Complete OAuth flow with authorization code.
+
+    After Schwab redirects you, extract the 'code' parameter from the URL
+    and POST it here to exchange for access tokens.
+    """
+    success = await schwab_client.exchange_code_for_tokens(data.code)
+
+    if success:
+        return {
+            "status": "authenticated",
+            "message": "Successfully authenticated with Schwab API",
+            "authenticated": True,
+        }
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Failed to exchange authorization code for tokens"
+        )
+
+
+@app.post("/auth/refresh")
+async def auth_refresh():
+    """Manually refresh the access token."""
+    if not schwab_client._refresh_token:
+        raise HTTPException(status_code=400, detail="No refresh token available")
+
+    success = await schwab_client.refresh_access_token()
+    if success:
+        return {"status": "refreshed", "authenticated": True}
+    else:
+        raise HTTPException(status_code=400, detail="Token refresh failed")
 
 
 # ============== Admin ==============

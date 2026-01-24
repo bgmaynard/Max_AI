@@ -1,0 +1,17 @@
+name: ALL_MOVERS
+description: All moving stocks (any change)
+enabled: true
+conditions: []
+weights:
+  change_pct: 1.0
+  velocity: 1.0
+  rvol: 1.0
+  hod_proximity: 1.0
+  spread: 0.5
+  volume: 0.5
+min_price: 5.0
+max_price: 500.0
+min_volume: 100000
+alert_enabled: false
+alert_sound: null
+alert_threshold: 0.7

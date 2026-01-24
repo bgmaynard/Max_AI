@@ -3,9 +3,10 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+import base64
 
 import httpx
 
@@ -42,10 +43,16 @@ class SchwabClient:
                     data = json.load(f)
                     self._access_token = data.get("access_token")
                     self._refresh_token = data.get("refresh_token")
+
+                    # Handle both formats: "expiry" (our format) or "expires_in" (Schwab native)
                     expiry = data.get("expiry")
                     if expiry:
                         self._token_expiry = datetime.fromisoformat(expiry)
-                    logger.info("Loaded Schwab tokens from disk")
+                    elif data.get("expires_in"):
+                        # Token might be expired, try refresh
+                        self._token_expiry = datetime.utcnow() - timedelta(seconds=1)
+
+                    logger.info(f"Loaded Schwab tokens from disk (has refresh: {bool(self._refresh_token)})")
             except Exception as e:
                 logger.warning(f"Failed to load tokens: {e}")
 
@@ -88,27 +95,94 @@ class SchwabClient:
             return False
 
         client = await self._get_client()
+
+        # Use Basic auth like the working implementation
+        credentials = f"{self.settings.schwab_client_id}:{self.settings.schwab_client_secret}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+
+        headers = {
+            "Authorization": f"Basic {encoded_credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": self._refresh_token,
+        }
+
+        try:
+            response = await client.post(self.AUTH_URL, headers=headers, data=data)
+
+            logger.info(f"Token refresh response: {response.status_code}")
+
+            if response.status_code != 200:
+                logger.error(f"Token refresh failed: {response.text}")
+                return False
+
+            token_data = response.json()
+            self._access_token = token_data["access_token"]
+            self._refresh_token = token_data.get("refresh_token", self._refresh_token)
+            expires_in = token_data.get("expires_in", 1800)
+            self._token_expiry = datetime.utcnow() + timedelta(seconds=expires_in - 60)
+            self._save_tokens()
+            logger.info("Refreshed Schwab access token successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Token refresh error: {e}")
+            return False
+
+    async def exchange_code_for_tokens(self, code: str) -> bool:
+        """
+        Exchange authorization code for access and refresh tokens.
+
+        Args:
+            code: Authorization code from OAuth callback
+
+        Returns:
+            True if successful, False otherwise
+        """
+        client = await self._get_client()
+
+        # Schwab requires Basic auth with client_id:client_secret
+        credentials = f"{self.settings.schwab_client_id}:{self.settings.schwab_client_secret}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+
+        headers = {
+            "Authorization": f"Basic {encoded_credentials}",
+            "Content-Type": "application/x-www-form-urlencoded",
+        }
+
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": self.settings.schwab_redirect_uri,
+        }
+
         try:
             response = await client.post(
                 self.AUTH_URL,
-                data={
-                    "grant_type": "refresh_token",
-                    "refresh_token": self._refresh_token,
-                    "client_id": self.settings.schwab_client_id,
-                    "client_secret": self.settings.schwab_client_secret,
-                },
+                headers=headers,
+                data=data,
             )
-            response.raise_for_status()
-            data = response.json()
-            self._access_token = data["access_token"]
-            self._refresh_token = data.get("refresh_token", self._refresh_token)
-            expires_in = data.get("expires_in", 1800)
-            self._token_expiry = datetime.utcnow() + asyncio.timedelta(seconds=expires_in - 60)
+
+            logger.info(f"Token exchange response status: {response.status_code}")
+
+            if response.status_code != 200:
+                logger.error(f"Token exchange failed: {response.text}")
+                return False
+
+            token_data = response.json()
+            self._access_token = token_data["access_token"]
+            self._refresh_token = token_data.get("refresh_token")
+            expires_in = token_data.get("expires_in", 1800)
+            self._token_expiry = datetime.utcnow() + timedelta(seconds=expires_in - 60)
+
             self._save_tokens()
-            logger.info("Refreshed Schwab access token")
+            logger.info("Successfully exchanged code for tokens")
             return True
+
         except Exception as e:
-            logger.error(f"Token refresh failed: {e}")
+            logger.error(f"Token exchange error: {e}")
             return False
 
     async def get_quotes(self, symbols: list[str]) -> dict[str, Quote]:
