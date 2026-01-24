@@ -21,6 +21,7 @@ from scanner_service.schemas.events import AlertEvent, AlertType, ScannerOutput,
 from scanner_service.schemas.profile import Profile, ProfileCondition, ProfileWeights
 from scanner_service.ingest.schwab_client import SchwabClient
 from scanner_service.ingest.universe import UniverseManager
+from scanner_service.ingest import finviz_client
 from scanner_service.features.feature_engine import FeatureEngine
 from scanner_service.strategy.profile_loader import ProfileLoader
 from scanner_service.strategy.scorer import Scorer
@@ -609,6 +610,52 @@ async def get_raw_quote(symbol: str):
         return {"error": f"No data for {symbol}"}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ============== Finviz Integration ==============
+
+@app.get("/finviz/top-gainers")
+async def get_finviz_top_gainers(
+    max_price: float = Query(20.0, description="Maximum stock price"),
+    min_change: float = Query(0.0, description="Minimum % change"),
+    max_float: Optional[float] = Query(None, description="Maximum float in millions"),
+    limit: int = Query(50, ge=1, le=200, description="Max results"),
+):
+    """
+    Get top gainers from Finviz with float data.
+
+    This endpoint fetches real-time top gainers from Finviz screener,
+    including float, shares outstanding, and other ownership data.
+    """
+    try:
+        results = await finviz_client.get_top_gainers(
+            max_price=max_price,
+            min_change=min_change,
+            max_float_millions=max_float,
+            limit=limit,
+        )
+        return {
+            "count": len(results),
+            "filters": {
+                "max_price": max_price,
+                "min_change": min_change,
+                "max_float": max_float,
+            },
+            "gainers": results,
+        }
+    except Exception as e:
+        logger.error(f"Finviz fetch error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/finviz/quote/{symbol}")
+async def get_finviz_quote(symbol: str):
+    """Get float and ownership data from Finviz for a specific symbol."""
+    symbol = symbol.upper()
+    result = await finviz_client.get_finviz_quote(symbol)
+    if result:
+        return result
+    raise HTTPException(status_code=404, detail=f"No Finviz data for {symbol}")
 
 
 # ============== Main ==============
