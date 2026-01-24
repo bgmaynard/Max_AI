@@ -547,6 +547,42 @@ async def cache_stats():
     return quote_cache.get_stats()
 
 
+class AddSymbolsRequest(BaseModel):
+    """Request to add symbols to universe."""
+    symbols: list[str]
+
+
+@app.post("/admin/universe/add")
+async def add_symbols(request: AddSymbolsRequest):
+    """Add symbols to the scanning universe."""
+    symbols = [s.upper().strip() for s in request.symbols]
+    universe.add_symbols(symbols)
+    return {"status": "added", "symbols": symbols, "total_universe": len(universe.universe)}
+
+
+@app.get("/admin/universe/symbols")
+async def list_universe():
+    """List all symbols in the universe."""
+    return {
+        "universe_size": len(universe.universe),
+        "candidates_size": len(universe.candidates),
+        "candidates": universe.candidates[:50],  # First 50 active candidates
+    }
+
+
+@app.get("/admin/quote/{symbol}")
+async def get_raw_quote(symbol: str):
+    """Get raw quote from Schwab for a symbol (for debugging)."""
+    symbol = symbol.upper()
+    try:
+        snapshot = await schwab_client.get_snapshot([symbol])
+        if symbol in snapshot.quotes:
+            return snapshot.quotes[symbol].model_dump()
+        return {"error": f"No data for {symbol}"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # ============== Main ==============
 
 def main():

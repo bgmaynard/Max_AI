@@ -72,6 +72,19 @@ SEED_UNIVERSE = [
     "BTCS", "APRE", "YGTY", "EVOK", "MBOT", "RSLS", "CNET", "FBIO", "BFRG", "LQDA",
     "CRGE", "DRUG", "ALLR", "CRBP", "MYSZ", "SEEL", "OTRK", "IMRN", "ZKIN", "PCT",
 
+    # Active Day Trading Penny Stocks (DTD movers)
+    "DRCT", "KUST", "RVYL", "REVB", "YYAI", "CNEY", "GXAI", "WBUY", "NVNI", "SOPA", "CXDO",
+    "LITM", "BEEM", "MGOL", "SVMH", "MDIA", "WISA", "BXRX", "SNGX", "ZCAR", "OBLG",
+    "OPTT", "BKYI", "SLRX", "VNET", "CTXR", "CISS", "SASI", "NNVC", "VTGN", "PBTS",
+    "WINT", "MDGS", "BDRX", "RNAZ", "HPCO", "DFFN", "SIEN", "NRXP", "GROM", "COSM",
+    "SILO", "EOSE", "AIRT", "VEEE", "SATL", "EEIQ", "PXMD", "ENVB", "NCPL", "EDBL",
+    "PALI", "CLVS", "AMST", "BSFC", "PRPH", "XTIA", "FGEN", "NUVB", "STSS", "COMS",
+    "SFIX", "LMFA", "BSEM", "LGMK", "XFOR", "CREG", "USEA", "HOLO", "VMAR", "DPRO",
+    "ONMD", "LUCY", "SYTA", "EFTR", "BWMX", "CRKN", "CDIO", "NXGL", "MNPR", "SMFL",
+
+    # Recent IPO / SPAC Penny Stocks
+    "RNXT", "SNAX", "GLUE", "SPRC", "SBFM", "BARK", "HLAH", "STRY", "AEVA", "VIEW",
+
     # OTC/Pink Sheet Popular (if available via Schwab)
     "EEENF", "OZSC", "DPLS", "MINE", "HCMC", "HMBL", "TSNP", "AITX", "GNUS", "BBRW",
 
