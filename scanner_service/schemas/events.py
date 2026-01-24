@@ -44,6 +44,7 @@ class ScannerRow(BaseModel):
     volume: int
     rvol: float
     velocity: float = Field(description="Price velocity score")
+    high: float = Field(description="High of day price")
     hod_proximity: float
     spread: float
     ai_score: float = Field(ge=0, le=1)

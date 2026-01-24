@@ -72,7 +72,7 @@ async def lifespan(app: FastAPI):
     ranker = Ranker()
     alert_router = AlertRouter()
     scanner_state = ScannerState()
-    quote_cache = QuoteCache(ttl_seconds=5.0)
+    quote_cache = QuoteCache(ttl_seconds=1.5)  # Short TTL to allow velocity calculation
 
     # Start scanner loop
     scanner_state.status = ScannerStatus.STARTING

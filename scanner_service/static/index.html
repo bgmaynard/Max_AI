@@ -335,6 +335,48 @@
             transition: width 0.3s;
         }
 
+        /* HOD Highlighting */
+        tr.at-hod {
+            background: rgba(35, 134, 54, 0.15) !important;
+            animation: hod-pulse 2s infinite;
+        }
+
+        tr.near-hod {
+            background: rgba(210, 153, 34, 0.1) !important;
+        }
+
+        @keyframes hod-pulse {
+            0%, 100% { background: rgba(35, 134, 54, 0.15); }
+            50% { background: rgba(35, 134, 54, 0.25); }
+        }
+
+        .cell-hod {
+            font-family: 'SF Mono', Monaco, monospace;
+            position: relative;
+        }
+
+        .cell-hod.hod-hit {
+            color: var(--accent-green-light);
+            font-weight: 600;
+        }
+
+        .hod-badge {
+            display: inline-block;
+            margin-left: 4px;
+            padding: 1px 4px;
+            font-size: 9px;
+            font-weight: 700;
+            background: var(--accent-green);
+            color: white;
+            border-radius: 3px;
+            animation: badge-flash 1s infinite;
+        }
+
+        @keyframes badge-flash {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
         /* Empty State */
         .empty-state {
             display: flex;
@@ -901,7 +943,7 @@
                                     <th onclick="sortPanel('${panel.id}', 'volume')">Volume</th>
                                     <th onclick="sortPanel('${panel.id}', 'rvol')">RVOL</th>
                                     <th onclick="sortPanel('${panel.id}', 'velocity')">Vel</th>
-                                    <th onclick="sortPanel('${panel.id}', 'hod_proximity')">HOD%</th>
+                                    <th onclick="sortPanel('${panel.id}', 'high')">HOD</th>
                                     <th onclick="sortPanel('${panel.id}', 'ai_score')">AI</th>
                                 </tr>
                             </thead>
@@ -1052,8 +1094,12 @@
                 return;
             }
 
-            tbody.innerHTML = rows.map((row, i) => `
-                <tr>
+            tbody.innerHTML = rows.map((row, i) => {
+                const isAtHOD = row.hod_proximity >= 0.98;
+                const isNearHOD = row.hod_proximity >= 0.95 && row.hod_proximity < 0.98;
+                const hodClass = isAtHOD ? 'at-hod' : (isNearHOD ? 'near-hod' : '');
+                return `
+                <tr class="${hodClass}">
                     <td>${i + 1}</td>
                     <td class="cell-symbol" onclick="showSymbolDetails('${row.symbol}')">${row.symbol}</td>
                     <td class="cell-price">$${row.last_price.toFixed(2)}</td>
@@ -1063,12 +1109,13 @@
                     <td>${formatVolume(row.volume)}</td>
                     <td>${row.rvol.toFixed(1)}x</td>
                     <td>${row.velocity.toFixed(2)}</td>
-                    <td>
-                        <div class="cell-bar"><div class="cell-bar-fill" style="width: ${row.hod_proximity * 100}%"></div></div>
+                    <td class="cell-hod ${isAtHOD ? 'hod-hit' : ''}">
+                        $${(row.high || 0).toFixed(2)}
+                        ${isAtHOD ? '<span class="hod-badge">HOD!</span>' : ''}
                     </td>
                     <td><span class="cell-score ${getScoreClass(row.ai_score)}">${row.ai_score.toFixed(2)}</span></td>
                 </tr>
-            `).join('');
+            `}).join('');
         }
 
         // Format volume

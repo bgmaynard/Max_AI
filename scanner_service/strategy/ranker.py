@@ -72,6 +72,7 @@ class Ranker:
                 volume=quote.volume,
                 rvol=features.get("rvol", 0),
                 velocity=features.get("velocity", 0),
+                high=quote.high,
                 hod_proximity=features.get("hod_proximity", 0),
                 spread=features.get("spread", 0),
                 ai_score=score_data["ai_score"],

@@ -242,9 +242,26 @@ class SchwabClient:
     def _parse_quotes(self, data: dict) -> dict[str, Quote]:
         """Parse Schwab API response into Quote objects."""
         quotes = {}
+        logged_sample = False
+
         for symbol, quote_data in data.items():
             try:
                 q = quote_data.get("quote", {})
+
+                # Log one sample to see available fields
+                if not logged_sample:
+                    logger.info(f"Schwab quote fields for {symbol}: {list(q.keys())}")
+                    logged_sample = True
+
+                # Try multiple field names for average volume
+                avg_vol = (
+                    q.get("averageVolume") or
+                    q.get("averageVolume10Day") or
+                    q.get("avg10DayVolume") or
+                    q.get("avgVolume") or
+                    0
+                )
+
                 quotes[symbol] = Quote(
                     symbol=symbol,
                     last_price=q.get("lastPrice", 0),
@@ -253,7 +270,7 @@ class SchwabClient:
                     bid_size=q.get("bidSize", 0),
                     ask_size=q.get("askSize", 0),
                     volume=q.get("totalVolume", 0),
-                    avg_volume=q.get("averageVolume", 0),
+                    avg_volume=avg_vol,
                     high=q.get("highPrice", 0),
                     low=q.get("lowPrice", 0),
                     open_price=q.get("openPrice", 0),
