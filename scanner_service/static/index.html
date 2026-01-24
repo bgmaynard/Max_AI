@@ -1238,6 +1238,7 @@
         }
 
         // Load panel data - uses sticky list to maintain persistence
+        // STOCKS STAY ON LIST FOREVER UNTIL MANUALLY CLEARED
         async function loadPanelData(panelId) {
             const panel = panels.find(p => p.id === panelId);
             if (!panel) return;
@@ -1246,11 +1247,10 @@
                 let fetchedRows = [];
 
                 if (panel.source === 'finviz') {
-                    // Fetch from Finviz endpoint - use broad filters to get all candidates
-                    // Client-side filters will handle display filtering
+                    // Fetch from Finviz endpoint
                     const params = new URLSearchParams({
-                        max_price: 50,  // Broad price range
-                        limit: 100      // Fetch plenty to build sticky list
+                        max_price: 50,
+                        limit: 100
                     });
 
                     const res = await fetch(`${API_BASE}/finviz/top-gainers?${params}`);
@@ -1258,19 +1258,15 @@
                     fetchedRows = data.gainers || [];
 
                     // Normalize field names
-                    fetchedRows = fetchedRows.map((r, i) => ({
+                    fetchedRows = fetchedRows.map(r => ({
                         ...r,
-                        last_price: r.price,
-                        _lastSeen: Date.now()
+                        last_price: r.price
                     }));
                 } else {
-                    // Fetch from scanner endpoint - get broad data
+                    // Fetch from scanner endpoint
                     const res = await fetch(`${API_BASE}/scanner/rows?profile=${panel.profile}&limit=200`);
                     const data = await res.json();
-                    fetchedRows = (data.rows || []).map(r => ({
-                        ...r,
-                        _lastSeen: Date.now()
-                    }));
+                    fetchedRows = data.rows || [];
                 }
 
                 // Initialize sticky list for this panel if needed
@@ -1279,49 +1275,54 @@
                 }
                 const sticky = stickyStocks.get(panelId);
 
-                // Merge fetched data into sticky list
+                // Track which symbols were just updated
+                const updatedSymbols = new Set();
+
+                // Merge fetched data into sticky list - UPDATE existing, ADD new
                 for (const row of fetchedRows) {
+                    updatedSymbols.add(row.symbol);
                     const existing = sticky.get(row.symbol);
+
                     if (existing) {
-                        // Update existing stock data, keep track of previous values
+                        // UPDATE existing stock - keep it on list, update values
                         sticky.set(row.symbol, {
-                            ...row,
+                            ...existing,           // Keep existing metadata
+                            ...row,                // Update with new values
                             _prevPrice: existing.last_price || existing.price,
-                            _addedAt: existing._addedAt
+                            _lastUpdate: Date.now(),
+                            _stale: false
                         });
                     } else {
-                        // New stock - add to sticky list
+                        // NEW stock - add to sticky list (it stays forever until cleared)
                         sticky.set(row.symbol, {
                             ...row,
-                            _addedAt: Date.now()
+                            _addedAt: Date.now(),
+                            _lastUpdate: Date.now(),
+                            _stale: false
                         });
                     }
                 }
 
-                // Mark stocks not in current fetch as stale (but keep them)
-                const fetchedSymbols = new Set(fetchedRows.map(r => r.symbol));
+                // Mark stocks not in current fetch as stale (BUT KEEP THEM ON LIST!)
                 sticky.forEach((data, symbol) => {
-                    if (!fetchedSymbols.has(symbol)) {
+                    if (!updatedSymbols.has(symbol)) {
                         data._stale = true;
-                    } else {
-                        data._stale = false;
                     }
                 });
 
-                // Convert sticky map to array and apply filters
+                // Convert sticky map to array - ALL stocks, no filtering removes them
                 let rows = Array.from(sticky.values());
-                rows = applyFilters(rows, panel.filters, panel.source);
 
-                // Sort
+                // Sort by selected column - positions change but stocks stay
                 const defaultSort = panel.source === 'finviz' ? 'change_pct' : 'ai_score';
                 rows = sortRows(rows, panel.sortBy || defaultSort, panel.sortDir || 'desc');
 
-                // Limit display (but keep all in sticky list)
-                rows = rows.slice(0, panel.maxRows || 50);
+                // NO LIMIT - show ALL stocks in sticky list
+                // They earned their spot, they stay until cleared
 
-                // Render
+                // Render ALL stocks
                 renderPanelTable(panelId, rows, panel.source);
-                document.getElementById(`count-${panelId}`).textContent = `${rows.length}/${sticky.size}`;
+                document.getElementById(`count-${panelId}`).textContent = sticky.size;
 
                 setStatus(true);
             } catch (err) {
@@ -1330,7 +1331,7 @@
             }
         }
 
-        // Clear sticky list for a panel
+        // Clear sticky list for a panel - ONLY way to remove stocks
         function clearStickyList(panelId) {
             stickyStocks.delete(panelId);
             loadPanelData(panelId);
