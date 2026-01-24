@@ -47,6 +47,8 @@ class ScannerRow(BaseModel):
     high: float = Field(description="High of day price")
     hod_proximity: float
     spread: float
+    float_shares: float = Field(default=0, description="Float shares in millions")
+    market_cap: float = Field(default=0, description="Market cap in millions")
     ai_score: float = Field(ge=0, le=1)
     profile: str
     alerts: list[str] = Field(default_factory=list, description="Active alert types")

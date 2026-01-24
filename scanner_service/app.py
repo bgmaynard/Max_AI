@@ -48,6 +48,10 @@ alert_router: Optional[AlertRouter] = None
 scanner_state: Optional[ScannerState] = None
 quote_cache: Optional[QuoteCache] = None
 
+# Fundamentals cache (refreshes less frequently than quotes)
+fundamentals_cache: dict[str, dict] = {}
+fundamentals_last_fetch: Optional[datetime] = None
+
 # Scanner loop task
 scanner_task: Optional[asyncio.Task] = None
 
@@ -120,6 +124,8 @@ async def scanner_loop():
 
 async def run_scan_cycle():
     """Execute a single scan cycle."""
+    global fundamentals_cache, fundamentals_last_fetch
+
     # Get symbols to scan
     symbols = universe.candidates
 
@@ -131,6 +137,28 @@ async def run_scan_cycle():
         snapshot = await schwab_client.get_snapshot(missing)
         quote_cache.set_many(snapshot.quotes)
         cached.update(snapshot.quotes)
+
+    # Fetch fundamentals periodically (every 5 minutes)
+    should_fetch_fundamentals = (
+        fundamentals_last_fetch is None or
+        (datetime.utcnow() - fundamentals_last_fetch).total_seconds() > 300
+    )
+    if should_fetch_fundamentals and symbols:
+        try:
+            new_fundamentals = await schwab_client.get_fundamentals(symbols)
+            fundamentals_cache.update(new_fundamentals)
+            fundamentals_last_fetch = datetime.utcnow()
+            logger.info(f"Updated fundamentals for {len(new_fundamentals)} symbols")
+        except Exception as e:
+            logger.warning(f"Fundamentals fetch failed: {e}")
+
+    # Enrich quotes with fundamentals (float, market cap)
+    # Convert to millions for easier display
+    for symbol, quote in cached.items():
+        if symbol in fundamentals_cache:
+            fund = fundamentals_cache[symbol]
+            quote.float_shares = fund.get("float_shares", 0) / 1_000_000  # Convert to millions
+            quote.market_cap = fund.get("market_cap", 0) / 1_000_000  # Convert to millions
 
     # Build full snapshot
     from scanner_service.schemas.market_snapshot import MarketSnapshot

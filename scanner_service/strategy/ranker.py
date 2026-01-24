@@ -75,6 +75,8 @@ class Ranker:
                 high=quote.high,
                 hod_proximity=features.get("hod_proximity", 0),
                 spread=features.get("spread", 0),
+                float_shares=quote.float_shares,
+                market_cap=quote.market_cap,
                 ai_score=score_data["ai_score"],
                 profile=profile.name,
                 alerts=[],  # Populated by alert system

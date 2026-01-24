@@ -319,3 +319,106 @@ class SchwabClient:
             timestamp=datetime.utcnow(),
             scan_duration_ms=duration,
         )
+
+    async def get_fundamentals(self, symbols: list[str]) -> dict[str, dict]:
+        """
+        Fetch fundamental data for symbols (including float/shares outstanding).
+
+        Args:
+            symbols: List of ticker symbols
+
+        Returns:
+            Dictionary mapping symbol to fundamental data
+        """
+        if not symbols:
+            return {}
+
+        if not self.is_authenticated():
+            logger.warning("Not authenticated - cannot fetch fundamentals")
+            return {}
+
+        # Schwab limits to ~100 symbols per request
+        batch_size = 100
+        all_fundamentals = {}
+
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i : i + batch_size]
+            batch_fundamentals = await self._fetch_fundamentals_batch(batch)
+            all_fundamentals.update(batch_fundamentals)
+
+        return all_fundamentals
+
+    async def _fetch_fundamentals_batch(self, symbols: list[str]) -> dict[str, dict]:
+        """Fetch a single batch of fundamentals."""
+        client = await self._get_client()
+        headers = {"Authorization": f"Bearer {self._access_token}"}
+
+        # Use the instruments endpoint with fundamental projection
+        params = {
+            "symbol": ",".join(symbols),
+            "projection": "fundamental",
+        }
+
+        try:
+            response = await client.get(
+                f"{self.BASE_URL}/instruments",
+                headers=headers,
+                params=params,
+            )
+            response.raise_for_status()
+            data = response.json()
+            return self._parse_fundamentals(data)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                logger.warning("Token expired during fundamentals fetch, attempting refresh")
+                if await self.refresh_access_token():
+                    return await self._fetch_fundamentals_batch(symbols)
+            logger.error(f"Fundamentals fetch failed: {e}")
+            return {}
+        except Exception as e:
+            logger.error(f"Fundamentals fetch error: {e}")
+            return {}
+
+    def _parse_fundamentals(self, data) -> dict[str, dict]:
+        """Parse Schwab fundamentals response."""
+        fundamentals = {}
+        logged_sample = False
+
+        # Schwab returns a list of instruments
+        instruments = data if isinstance(data, list) else data.get("instruments", [])
+
+        for instrument in instruments:
+            try:
+                symbol = instrument.get("symbol", "")
+                if not symbol:
+                    continue
+
+                fund = instrument.get("fundamental", {})
+
+                # Log one sample to see available fields
+                if not logged_sample and fund:
+                    logger.info(f"Schwab fundamental fields for {symbol}: {list(fund.keys())}")
+                    logged_sample = True
+
+                # Schwab provides sharesOutstanding and marketCapFloat
+                shares_outstanding = fund.get("sharesOutstanding", 0) or 0
+                market_cap = fund.get("marketCap", 0) or 0
+
+                # marketCapFloat is the float in shares (not dollars!)
+                # If not available, estimate as 85% of shares outstanding
+                float_shares = fund.get("marketCapFloat", 0) or 0
+                if float_shares == 0 and shares_outstanding > 0:
+                    float_shares = shares_outstanding * 0.85
+
+                fundamentals[symbol] = {
+                    "float_shares": float_shares,  # Float shares
+                    "shares_outstanding": shares_outstanding,
+                    "market_cap": market_cap,
+                    "pe_ratio": fund.get("peRatio", 0) or 0,
+                    "dividend_yield": fund.get("dividendYield", 0) or 0,
+                    "avg_volume": fund.get("avg10DaysVolume", 0) or 0,
+                }
+            except Exception as e:
+                logger.warning(f"Failed to parse fundamentals for instrument: {e}")
+
+        return fundamentals

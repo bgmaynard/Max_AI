@@ -690,7 +690,7 @@
                 </div>
 
                 <div class="form-section">
-                    <div class="form-section-title">Volume Filters</div>
+                    <div class="form-section-title">Volume & Float Filters</div>
                     <div class="form-row">
                         <div class="form-group">
                             <label>Min Volume</label>
@@ -700,6 +700,18 @@
                             <label>Min RVOL (x)</label>
                             <input type="number" id="filterMinRvol" placeholder="0" step="0.1">
                             <div class="form-hint">e.g., 1.5 = 150% of average</div>
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>Min Float (K)</label>
+                            <input type="number" id="filterMinFloatK" placeholder="e.g. 35" step="10">
+                            <div class="form-hint">Min shares in thousands</div>
+                        </div>
+                        <div class="form-group">
+                            <label>Max Float (M)</label>
+                            <input type="number" id="filterMaxFloat" placeholder="e.g. 50" step="5">
+                            <div class="form-hint">Max shares in millions (low float)</div>
                         </div>
                     </div>
                 </div>
@@ -750,6 +762,7 @@
                                 <option value="ai_score">AI Score</option>
                                 <option value="change_pct">Change %</option>
                                 <option value="volume">Volume</option>
+                                <option value="float_shares">Float (Low First)</option>
                                 <option value="rvol">RVOL</option>
                                 <option value="hod_proximity">HOD %</option>
                                 <option value="velocity">Velocity</option>
@@ -941,6 +954,7 @@
                                     <th onclick="sortPanel('${panel.id}', 'last_price')">Price</th>
                                     <th onclick="sortPanel('${panel.id}', 'change_pct')">Chg %</th>
                                     <th onclick="sortPanel('${panel.id}', 'volume')">Volume</th>
+                                    <th onclick="sortPanel('${panel.id}', 'float_shares')">Float</th>
                                     <th onclick="sortPanel('${panel.id}', 'rvol')">RVOL</th>
                                     <th onclick="sortPanel('${panel.id}', 'velocity')">Vel</th>
                                     <th onclick="sortPanel('${panel.id}', 'high')">HOD</th>
@@ -948,7 +962,7 @@
                                 </tr>
                             </thead>
                             <tbody id="tbody-${panel.id}">
-                                <tr><td colspan="9" class="empty-state">Loading...</td></tr>
+                                <tr><td colspan="10" class="empty-state">Loading...</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -985,6 +999,15 @@
                     <label>HOD≥</label>
                     <input type="number" class="filter-input" placeholder="0" value="${f.minHod || ''}"
                            onchange="updatePanelFilter('${panel.id}', 'minHod', this.value)">%
+                </div>
+                <div class="filter-divider"></div>
+                <div class="filter-group">
+                    <label>Float</label>
+                    <input type="number" class="filter-input" placeholder="Min" value="${f.minFloatK || ''}"
+                           onchange="updatePanelFilter('${panel.id}', 'minFloatK', this.value)">K
+                    <span>-</span>
+                    <input type="number" class="filter-input" placeholder="Max" value="${f.maxFloat || ''}"
+                           onchange="updatePanelFilter('${panel.id}', 'maxFloat', this.value)">M
                 </div>
                 <div class="filter-divider"></div>
                 <div class="filter-group">
@@ -1050,6 +1073,11 @@
                 if (filters.minAI && row.ai_score < filters.minAI) return false;
                 if (filters.minVelocity && row.velocity < filters.minVelocity) return false;
                 if (filters.minVolume && row.volume < filters.minVolume) return false;
+                // Float filter (minFloatK in thousands, maxFloat in millions)
+                if (filters.maxFloat && row.float_shares > 0 && row.float_shares > filters.maxFloat) return false;
+                // minFloatK is in thousands, convert to millions for comparison
+                if (filters.minFloatK && (row.float_shares || 0) < (filters.minFloatK / 1000)) return false;
+                if (filters.minFloat && (row.float_shares || 0) < filters.minFloat) return false;
                 return true;
             });
         }
@@ -1084,7 +1112,7 @@
 
             if (rows.length === 0) {
                 tbody.innerHTML = `
-                    <tr><td colspan="9" class="empty-state">
+                    <tr><td colspan="10" class="empty-state">
                         <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
                             <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
                         </svg>
@@ -1098,6 +1126,8 @@
                 const isAtHOD = row.hod_proximity >= 0.98;
                 const isNearHOD = row.hod_proximity >= 0.95 && row.hod_proximity < 0.98;
                 const hodClass = isAtHOD ? 'at-hod' : (isNearHOD ? 'near-hod' : '');
+                const floatShares = row.float_shares || 0;
+                const isLowFloat = floatShares > 0 && floatShares < 20; // Under 20M shares
                 return `
                 <tr class="${hodClass}">
                     <td>${i + 1}</td>
@@ -1107,6 +1137,7 @@
                         ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
                     </td>
                     <td>${formatVolume(row.volume)}</td>
+                    <td class="${isLowFloat ? 'cell-positive' : ''}">${formatFloat(floatShares)}</td>
                     <td>${row.rvol.toFixed(1)}x</td>
                     <td>${row.velocity.toFixed(2)}</td>
                     <td class="cell-hod ${isAtHOD ? 'hod-hit' : ''}">
@@ -1123,6 +1154,14 @@
             if (vol >= 1000000) return (vol / 1000000).toFixed(1) + 'M';
             if (vol >= 1000) return (vol / 1000).toFixed(0) + 'K';
             return vol;
+        }
+
+        // Format float (in millions)
+        function formatFloat(floatM) {
+            if (!floatM || floatM === 0) return '-';
+            if (floatM >= 1000) return (floatM / 1000).toFixed(1) + 'B';
+            if (floatM >= 1) return floatM.toFixed(1) + 'M';
+            return (floatM * 1000).toFixed(0) + 'K';
         }
 
         // Get score class
@@ -1169,6 +1208,8 @@
             document.getElementById('filterMinHod').value = '';
             document.getElementById('filterMinAI').value = '';
             document.getElementById('filterMinVelocity').value = '';
+            document.getElementById('filterMinFloatK').value = '';
+            document.getElementById('filterMaxFloat').value = '';
             document.getElementById('filterMaxRows').value = '50';
             document.getElementById('panelModal').classList.add('active');
         }
@@ -1191,7 +1232,9 @@
                 maxChange: parseFloat(document.getElementById('filterMaxChange').value) || null,
                 minHod: parseFloat(document.getElementById('filterMinHod').value) || null,
                 minAI: parseFloat(document.getElementById('filterMinAI').value) || null,
-                minVelocity: parseFloat(document.getElementById('filterMinVelocity').value) || null
+                minVelocity: parseFloat(document.getElementById('filterMinVelocity').value) || null,
+                minFloatK: parseFloat(document.getElementById('filterMinFloatK').value) || null,
+                maxFloat: parseFloat(document.getElementById('filterMaxFloat').value) || null
             };
 
             const sortBy = document.getElementById('filterSortBy').value;
@@ -1252,6 +1295,8 @@
             document.getElementById('filterMinHod').value = panel.filters?.minHod || '';
             document.getElementById('filterMinAI').value = panel.filters?.minAI || '';
             document.getElementById('filterMinVelocity').value = panel.filters?.minVelocity || '';
+            document.getElementById('filterMinFloatK').value = panel.filters?.minFloatK || '';
+            document.getElementById('filterMaxFloat').value = panel.filters?.maxFloat || '';
             document.getElementById('filterMaxRows').value = panel.maxRows || 50;
             document.getElementById('filterSortBy').value = panel.sortBy || 'ai_score';
 

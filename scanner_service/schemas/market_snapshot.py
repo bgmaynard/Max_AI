@@ -22,6 +22,8 @@ class Quote(BaseModel):
     prev_close: float = Field(ge=0, description="Previous close")
     change: float = Field(description="Price change from prev close")
     change_pct: float = Field(description="Percent change from prev close")
+    float_shares: float = Field(default=0, description="Float shares in millions")
+    market_cap: float = Field(default=0, description="Market cap in millions")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
     @property
