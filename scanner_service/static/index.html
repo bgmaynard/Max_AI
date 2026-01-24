@@ -1247,10 +1247,10 @@
                 let fetchedRows = [];
 
                 if (panel.source === 'finviz') {
-                    // Fetch from Finviz endpoint
+                    // Fetch from Finviz endpoint - get ALL top gainers, no price filter
                     const params = new URLSearchParams({
-                        max_price: 50,
-                        limit: 100
+                        max_price: 1000,  // No practical limit
+                        limit: 500        // Get all available
                     });
 
                     const res = await fetch(`${API_BASE}/finviz/top-gainers?${params}`);
