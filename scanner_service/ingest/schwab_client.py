@@ -212,8 +212,17 @@ class SchwabClient:
     async def _fetch_quote_batch(self, symbols: list[str]) -> dict[str, Quote]:
         """Fetch a single batch of quotes."""
         if not self.is_authenticated():
-            logger.warning("Not authenticated - returning empty quotes")
-            return self._generate_mock_quotes(symbols)
+            # Try to refresh token first
+            if self._refresh_token:
+                logger.info("Token expired, attempting auto-refresh...")
+                if await self.refresh_access_token():
+                    logger.info("Token auto-refreshed successfully")
+                else:
+                    logger.warning("Auto-refresh failed - returning empty quotes")
+                    return {}
+            else:
+                logger.warning("Not authenticated and no refresh token - returning empty quotes")
+                return {}
 
         client = await self._get_client()
         headers = {"Authorization": f"Bearer {self._access_token}"}
@@ -234,10 +243,10 @@ class SchwabClient:
                 if await self.refresh_access_token():
                     return await self._fetch_quote_batch(symbols)
             logger.error(f"Quote fetch failed: {e}")
-            return self._generate_mock_quotes(symbols)
+            return {}  # Return empty instead of mock data
         except Exception as e:
             logger.error(f"Quote fetch error: {e}")
-            return self._generate_mock_quotes(symbols)
+            return {}  # Return empty instead of mock data
 
     def _parse_quotes(self, data: dict) -> dict[str, Quote]:
         """Parse Schwab API response into Quote objects."""
