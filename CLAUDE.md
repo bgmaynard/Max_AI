@@ -128,8 +128,12 @@ This bot is part of a multi-bot trading system. All bots share a Schwab account 
 3. **Max_AI scanner** → port 8787, 10s init wait
 4. **Supervisor + Control API + ngrok** → port 9001 + tunnel URL
 
-### Integration Points
-- Morpheus_AI polls Max_AI advisories at `GET http://localhost:8787/advisories?min_confidence=0.5` every 60s
-- Morpheus_AI reads shared Schwab token from IBKR_V2's token file (never refreshes itself)
-- AI_SUPERVISOR monitors all bots, runs cross-bot variance analysis
+### Inter-Bot Communication (this bot's links)
+- **Morpheus_AI → Max_AI**: `GET http://localhost:8787/advisories?min_confidence=0.5` every 60s (`morpheus/services/max_advisory_poller.py`). Also `GET /health` at boot. Optional — Morpheus continues if Max down.
+- **IBKR_V2 → Max_AI**: `GET http://localhost:8787/advisories?min_confidence=0.5` + `GET /advisories/negative` every 60s (`ai/max_advisory_poller.py`). Optional.
+- **Max_AI → Schwab token**: Reads `SCHWAB_TOKEN_PATH` from `.env` every 60s (`token_reload_loop()` in `app.py`) + on 401. IBKR_V2 is sole writer.
+- **This bot does NOT**: Call Morpheus_AI, IBKR_V2, or AI_SUPERVISOR. Purely pull-based — bots poll this service.
+- **Deprecated stubs**: `/morpheus/inject`, `/morpheus/auto-inject/*`, `/news/push-to-morpheus` return `{"status": "deprecated"}`.
+- **AI_SUPERVISOR**: Does not call Max_AI (not in bots.json).
+- **Full inter-comm map**: See `C:\Morpheus\CLAUDE.md` Bot Ecosystem section.
 - All bots use Eastern Time (ET) via TimeAuthority or ZoneInfo fallback
