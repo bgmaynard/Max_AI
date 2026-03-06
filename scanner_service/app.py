@@ -38,6 +38,9 @@ from scanner_service.advisory_buffer import get_advisory_buffer, AdvisoryBuffer,
 from scanner_service.watchlist.stock_classifier import StockClassifier
 from scanner_service.watchlist.daily_tracker import DailyTracker
 from scanner_service.watchlist.vetted_list import VettedWatchlist
+from scanner_service.ingest.news_pipeline import get_news_pipeline, NewsPipeline
+from scanner_service.strategy.ignition_scorer import IgnitionScorer
+from scanner_service.health_monitor import get_health_monitor, HealthMonitor
 
 # Configure logging
 logging.basicConfig(
@@ -65,6 +68,11 @@ advisory_buffer: Optional[AdvisoryBuffer] = None
 stock_classifier: Optional[StockClassifier] = None
 daily_tracker: Optional[DailyTracker] = None
 vetted_watchlist: Optional[VettedWatchlist] = None
+
+# Ignition scorer + Health monitor + News pipeline
+ignition_scorer: Optional[IgnitionScorer] = None
+health_monitor: Optional[HealthMonitor] = None
+news_pipeline: Optional[NewsPipeline] = None
 
 # Phase-aware advisory thresholds
 # Pre-market: accumulate aggressively, low bar, long TTL
@@ -180,6 +188,7 @@ async def lifespan(app: FastAPI):
     global scorer, ranker, alert_router, scanner_state, quote_cache, scanner_task
     global token_refresh_task, advisory_buffer
     global stock_classifier, daily_tracker, vetted_watchlist
+    global ignition_scorer, health_monitor, news_pipeline
 
     logger.info("Starting Max Scanner Service...")
 
@@ -197,6 +206,9 @@ async def lifespan(app: FastAPI):
     stock_classifier = StockClassifier()
     daily_tracker = DailyTracker()
     vetted_watchlist = VettedWatchlist(max_stocks=10)
+    ignition_scorer = IgnitionScorer()
+    health_monitor = get_health_monitor()
+    news_pipeline = get_news_pipeline()
     phase = get_market_phase()
     phase_cfg = PHASE_CONFIG.get(phase, PHASE_CONFIG["OPEN"])
     logger.info(
@@ -215,14 +227,19 @@ async def lifespan(app: FastAPI):
 
     logger.info(f"Scanner service started on {settings.scanner_host}:{settings.scanner_port}")
 
-    # Auto-start news RSS polling
+    # Auto-start news pipeline with source redundancy
     try:
-        from scanner_service.ingest.news_client import get_news_client
-        nc = get_news_client()
-        nc.start(poll_interval=30)
-        logger.info("[NEWS] Auto-started news RSS polling (30s interval)")
+        news_pipeline.start(poll_interval=30)
+        logger.info("[NEWS_PIPELINE] Auto-started with redundancy (30s interval)")
     except Exception as e:
-        logger.warning(f"[NEWS] Failed to auto-start news client: {e}")
+        logger.warning(f"[NEWS_PIPELINE] Failed to auto-start: {e}")
+
+    # Start health monitor
+    try:
+        health_monitor.start(check_interval=60)
+        logger.info("[HEALTH] Monitor started (60s interval, logs/scanner_health.log)")
+    except Exception as e:
+        logger.warning(f"[HEALTH] Failed to start monitor: {e}")
 
     yield
 
@@ -639,6 +656,7 @@ def _check_negative_intelligence(row, phase: str) -> tuple[Optional[str], str]:
 async def run_scan_cycle():
     """Execute a single scan cycle."""
     global fundamentals_cache, fundamentals_last_fetch
+    _cycle_start = datetime.utcnow()
 
     # TradingView pre-market gapper injection (every 5 min during pre-market)
     await _fetch_tradingview_gappers()
@@ -649,11 +667,10 @@ async def run_scan_cycle():
     # Intraday small-cap movers (TV + Finviz, every 5 min during OPEN)
     await _fetch_intraday_smallcap_movers()
 
-    # Feed universe symbols to news client for dynamic Yahoo RSS
+    # Feed universe symbols to news pipeline for dynamic Yahoo RSS
     try:
-        nc = _get_news_client()
-        if nc and universe:
-            nc.set_universe_symbols(set(universe.candidates))
+        if news_pipeline and universe:
+            news_pipeline.set_universe_symbols(set(universe.candidates))
     except Exception:
         pass
 
@@ -903,6 +920,102 @@ async def run_scan_cycle():
                     f"| promotions={stats['promotions']} demotions={stats['demotions']}"
                 )
 
+    # ── Ignition scoring: rank by probability of ignition ────────────
+    if ignition_scorer and outputs:
+        # Feed catalyst data from news pipeline
+        try:
+            if news_pipeline:
+                nc = news_pipeline.news_client
+                if nc.recent_alerts:
+                    ignition_scorer.update_catalysts_from_news(nc.recent_alerts)
+        except Exception:
+            pass
+
+        # Collect all unique rows for ignition scoring
+        all_rows_for_ignition = {}
+        for profile_name, output in outputs.items():
+            for row in output.rows:
+                sym = row.symbol
+                if sym not in all_rows_for_ignition or row.ai_score > all_rows_for_ignition[sym].ai_score:
+                    all_rows_for_ignition[sym] = row
+
+        if all_rows_for_ignition:
+            ignition_ranked = ignition_scorer.rank_symbols(
+                rows=list(all_rows_for_ignition.values()),
+                features=features,
+                quotes=snapshot.quotes,
+                limit=20,
+            )
+            # Store for API access
+            scanner_state._ignition_ranked = ignition_ranked
+
+    # ── Premarket focus mode: prioritized list for Morpheus ──────────
+    phase = get_market_phase()
+    if phase == "PREMARKET" and advisory_buffer and outputs:
+        premarket_focus = []
+        for profile_name, output in outputs.items():
+            for row in output.rows:
+                feat = features.get(row.symbol, {})
+                rvol = feat.get("rvol", row.rvol if hasattr(row, "rvol") else 0)
+                float_m = row.float_shares if hasattr(row, "float_shares") else 0
+                has_catalyst = row.symbol in (ignition_scorer._catalyst_symbols if ignition_scorer else {})
+
+                if (rvol >= 3
+                    and (0 < float_m < 50 or float_m == 0)
+                    and 1.0 <= row.last_price <= 20.0):
+                    premarket_focus.append({
+                        "symbol": row.symbol,
+                        "price": row.last_price,
+                        "change_pct": row.change_pct,
+                        "rvol": round(rvol, 2),
+                        "float_m": round(float_m, 1),
+                        "ai_score": row.ai_score,
+                        "has_catalyst": has_catalyst,
+                        "profile": profile_name,
+                    })
+
+        # Deduplicate by symbol, keep highest ai_score
+        seen = {}
+        for item in premarket_focus:
+            sym = item["symbol"]
+            if sym not in seen or item["ai_score"] > seen[sym]["ai_score"]:
+                seen[sym] = item
+        premarket_focus = sorted(seen.values(), key=lambda x: x["ai_score"], reverse=True)[:20]
+
+        if premarket_focus:
+            scanner_state._premarket_focus = premarket_focus
+            # Emit focused advisories with boosted confidence
+            emitted_focus = 0
+            phase_cfg = PHASE_CONFIG.get("PREMARKET", PHASE_CONFIG["OPEN"])
+            for item in premarket_focus:
+                confidence = min(item["ai_score"] + 0.10, 0.95)
+                adv = advisory_buffer.emit(
+                    symbol=item["symbol"],
+                    source="premarket_focus",
+                    confidence=confidence,
+                    reason=f"Premarket focus: rvol={item['rvol']}x float={item['float_m']}M{'+ catalyst' if item['has_catalyst'] else ''}",
+                    price=item["price"],
+                    change_pct=item["change_pct"],
+                    volume=0,
+                    rvol=item["rvol"],
+                    float_shares=item["float_m"],
+                    profile="premarket_focus",
+                    ttl_override=phase_cfg["ttl_seconds"],
+                )
+                if adv:
+                    emitted_focus += 1
+                    await push_advisory(adv.model_dump(mode="json"))
+            if emitted_focus:
+                logger.info(
+                    f"[PREMARKET_FOCUS] Emitted {emitted_focus} focused advisories "
+                    f"(rvol>=3, float<50M, $1-$20)"
+                )
+
+    # ── Record scan latency for health monitor ───────────────────────
+    _cycle_elapsed_ms = (datetime.utcnow() - _cycle_start).total_seconds() * 1000
+    if health_monitor:
+        health_monitor.record_scan_latency(_cycle_elapsed_ms)
+
 
 async def push_advisory(advisory_data: dict) -> None:
     """Push advisory to all connected WebSocket consumers (Morpheus, IBKR_V2)."""
@@ -1009,13 +1122,19 @@ async def health():
     # Schwab health (can we fetch quotes?)
     schwab_ok = schwab_client is not None and schwab_client.is_authenticated()
 
-    # RSS/news health
+    # RSS/news health (check pipeline if available, fallback to client)
     rss_ok = False
+    news_sources_ok = 0
     try:
-        from scanner_service.ingest.news_client import get_news_client
-        nc = get_news_client()
-        ns = nc.get_status()
-        rss_ok = ns.get("running", False) and ns.get("poll_count", 0) > 0
+        if news_pipeline:
+            ps = news_pipeline.get_status()
+            rss_ok = ps.get("running", False) and ps.get("poll_count", 0) > 0
+            news_sources_ok = ps.get("sources_ok", 0)
+        else:
+            from scanner_service.ingest.news_client import get_news_client
+            nc = get_news_client()
+            ns = nc.get_status()
+            rss_ok = ns.get("running", False) and ns.get("poll_count", 0) > 0
     except Exception:
         pass
 
@@ -1041,8 +1160,11 @@ async def health():
         "intraday_status": intraday_status,
         "intraday_last_fetch": intraday_last,
         "rss_ok": rss_ok,
+        "news_sources_ok": news_sources_ok,
         "schwab_ok": schwab_ok,
         "errors_last_hour": errors_last_hour,
+        "ignition_ranked_count": len(getattr(scanner_state, "_ignition_ranked", []) if scanner_state else []),
+        "premarket_focus_count": len(getattr(scanner_state, "_premarket_focus", []) if scanner_state else []),
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -1983,9 +2105,11 @@ def _get_news_client():
 
 @app.get("/news/status")
 async def news_status():
-    """Get news client status."""
-    client = _get_news_client()
-    return client.get_status()
+    """Get news client status (includes pipeline health if active)."""
+    status = _get_news_client().get_status()
+    if news_pipeline:
+        status["pipeline"] = news_pipeline.get_status()
+    return status
 
 
 @app.post("/news/start")
@@ -2029,6 +2153,72 @@ async def poll_news_now():
 async def push_news_to_morpheus_stub():
     """Deprecated. News advisories are emitted to the advisory buffer automatically."""
     return {"status": "deprecated", "message": "Use GET /advisories"}
+
+
+# ============== Ignition Ranking ==============
+
+
+@app.get("/ignition/ranked")
+async def get_ignition_ranked(limit: int = Query(20, ge=1, le=50)):
+    """Get symbols ranked by ignition probability (highest first)."""
+    ranked = getattr(scanner_state, "_ignition_ranked", []) if scanner_state else []
+    return {
+        "ranked": ranked[:limit],
+        "count": len(ranked[:limit]),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/ignition/catalysts")
+async def get_ignition_catalysts():
+    """Get known catalyst symbols from news pipeline."""
+    if not ignition_scorer:
+        return {"catalysts": {}}
+    return {"catalysts": ignition_scorer.get_catalyst_symbols()}
+
+
+# ============== Premarket Focus ==============
+
+
+@app.get("/premarket/focus")
+async def get_premarket_focus():
+    """Get premarket focus list (rvol>=3, float<50M, $1-$20, ranked by AI score)."""
+    focus = getattr(scanner_state, "_premarket_focus", []) if scanner_state else []
+    phase = get_market_phase()
+    return {
+        "focus": focus,
+        "count": len(focus),
+        "phase": phase,
+        "active": phase == "PREMARKET",
+        "criteria": {
+            "rvol_min": 3,
+            "float_max_m": 50,
+            "price_range": "$1-$20",
+            "news_catalyst": "boosted if present",
+        },
+    }
+
+
+# ============== News Pipeline (redundant) ==============
+
+
+@app.get("/news/pipeline/status")
+async def news_pipeline_status():
+    """Get news pipeline status with per-source health."""
+    if not news_pipeline:
+        return {"error": "Pipeline not initialized"}
+    return news_pipeline.get_status()
+
+
+# ============== Health Monitor ==============
+
+
+@app.get("/health/monitor")
+async def get_health_monitor_status():
+    """Get health monitor status and latency stats."""
+    if not health_monitor:
+        return {"error": "Monitor not initialized"}
+    return health_monitor.get_status()
 
 
 # ============== Main ==============
