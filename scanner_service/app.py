@@ -121,6 +121,11 @@ _tv_last_fetch: Optional[datetime] = None
 _tv_fetch_interval_seconds: int = 300  # every 5 minutes
 _tv_discovered_symbols: set[str] = set()  # track what TV already found this session
 
+# Webull premarket gainer state
+_wb_last_fetch: Optional[datetime] = None
+_wb_fetch_interval_seconds: int = 300  # every 5 minutes
+_wb_discovered_symbols: set[str] = set()
+
 # Intraday small-cap mover state (TV + Finviz during OPEN phase)
 _intraday_last_fetch: Optional[datetime] = None
 _intraday_fetch_interval_seconds: int = 300  # every 5 minutes
@@ -341,6 +346,75 @@ async def _fetch_tradingview_gappers():
         logger.warning(f"[TV] TradingView fetch failed (non-fatal): {e}")
 
 
+async def _fetch_webull_premarket_gainers():
+    """Fetch Webull premarket top gainers and inject into universe + advisory buffer.
+
+    Runs every 5 minutes during PREMARKET phase only.
+    Complements TradingView with a second independent source.
+    """
+    global _wb_last_fetch, _wb_discovered_symbols
+
+    phase = get_market_phase()
+    if phase != "PREMARKET":
+        return
+
+    now = datetime.utcnow()
+    if _wb_last_fetch and (now - _wb_last_fetch).total_seconds() < _wb_fetch_interval_seconds:
+        return
+
+    _wb_last_fetch = now
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from scanner_service.ingest.webull_client import fetch_premarket_gainers
+
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as pool:
+            gainers = await loop.run_in_executor(pool, fetch_premarket_gainers)
+
+        if not gainers:
+            return
+
+        new_symbols = []
+        for g in gainers:
+            sym = g["symbol"]
+            if sym not in _wb_discovered_symbols:
+                _wb_discovered_symbols.add(sym)
+                new_symbols.append(sym)
+
+        if new_symbols and universe:
+            universe.add_symbols(new_symbols)
+            logger.info(f"[WEBULL] Added {len(new_symbols)} new symbols to universe: {new_symbols}")
+
+        if advisory_buffer:
+            phase_cfg = PHASE_CONFIG.get("PREMARKET", PHASE_CONFIG["OPEN"])
+            ttl = phase_cfg["ttl_seconds"]
+            emitted = 0
+            for g in gainers:
+                confidence = min(0.55 + (g["change_pct"] / 200.0), 0.95)
+                adv = advisory_buffer.emit(
+                    symbol=g["symbol"],
+                    source="webull_premarket",
+                    confidence=confidence,
+                    reason=f"Webull premarket: +{g['change_pct']:.1f}% vol={g['volume']:,}",
+                    price=g["price"],
+                    change_pct=g["change_pct"],
+                    volume=g["volume"],
+                    rvol=0,
+                    float_shares=0,
+                    profile="webull_gappers",
+                    ttl_override=ttl,
+                )
+                if adv:
+                    emitted += 1
+                    await push_advisory(adv.model_dump(mode="json"))
+            if emitted:
+                logger.info(f"[WEBULL] Emitted {emitted} pre-market advisories")
+
+    except Exception as e:
+        logger.warning(f"[WEBULL] Premarket fetch failed (non-fatal): {e}")
+
+
 async def _fetch_intraday_smallcap_movers():
     """Fetch small-cap movers during OPEN phase from TradingView + Finviz.
 
@@ -523,6 +597,9 @@ async def run_scan_cycle():
 
     # TradingView pre-market gapper injection (every 5 min during pre-market)
     await _fetch_tradingview_gappers()
+
+    # Webull pre-market top gainers (every 5 min during pre-market)
+    await _fetch_webull_premarket_gainers()
 
     # Intraday small-cap movers (TV + Finviz, every 5 min during OPEN)
     await _fetch_intraday_smallcap_movers()
@@ -1595,6 +1672,35 @@ async def intraday_fetch_now():
         "status": "fetched",
         "total_found": total,
         "results": results,
+    }
+
+
+# ============== Webull Pre-Market ==============
+
+
+@app.get("/webull/status")
+async def webull_status():
+    """Get Webull pre-market scanner status."""
+    return {
+        "last_fetch": _wb_last_fetch.isoformat() if _wb_last_fetch else None,
+        "fetch_interval_seconds": _wb_fetch_interval_seconds,
+        "discovered_count": len(_wb_discovered_symbols),
+        "discovered_symbols": sorted(_wb_discovered_symbols),
+        "phase": get_market_phase(),
+        "active": get_market_phase() == "PREMARKET",
+    }
+
+
+@app.post("/webull/fetch-now")
+async def webull_fetch_now():
+    """Trigger an immediate Webull pre-market fetch (ignores cooldown)."""
+    global _wb_last_fetch
+    _wb_last_fetch = None  # Reset cooldown to force fetch
+    await _fetch_webull_premarket_gainers()
+    return {
+        "status": "fetched",
+        "discovered_count": len(_wb_discovered_symbols),
+        "discovered_symbols": sorted(_wb_discovered_symbols),
     }
 
 
