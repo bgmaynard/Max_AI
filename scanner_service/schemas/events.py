@@ -49,6 +49,8 @@ class ScannerRow(BaseModel):
     spread: float
     float_shares: float = Field(default=0, description="Float shares in millions")
     market_cap: float = Field(default=0, description="Market cap in millions")
+    avg_volume: int = Field(default=0, description="Average daily volume")
+    short_interest: float = Field(default=0, description="Short interest percentage")
     ai_score: float = Field(ge=0, le=1)
     profile: str
     alerts: list[str] = Field(default_factory=list, description="Active alert types")

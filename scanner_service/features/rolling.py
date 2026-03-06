@@ -31,6 +31,16 @@ class SymbolRollingState:
     hod_break_count: int = 0
     last_update: Optional[datetime] = None
 
+    # Acceleration tracking
+    prev_velocity: float = 0.0
+    velocity_accel: float = 0.0  # velocity delta between scans
+    prev_change_pct: float = 0.0
+    change_accel: float = 0.0  # change_pct delta between scans
+    prev_rvol: float = 0.0
+    rvol_crossed_up: bool = False  # True when rvol crosses 2.0 from below
+    momentum_history: deque = field(default_factory=lambda: deque(maxlen=5))
+    momentum_slope: float = 0.0  # linear slope of last 5 momentum scores
+
     def update(self, price: float, volume: int, hod: float) -> None:
         """Update rolling state with new observation."""
         now = datetime.utcnow()
@@ -46,6 +56,32 @@ class SymbolRollingState:
         self.prev_price = price
         self.prev_hod = hod
         self.last_update = now
+
+        # Update acceleration features after prices are appended
+        current_vel = self.velocity()
+        self.velocity_accel = current_vel - self.prev_velocity
+        self.prev_velocity = current_vel
+
+        current_mom = self.momentum_score()
+        self.momentum_history.append(current_mom)
+        if len(self.momentum_history) >= 3:
+            vals = list(self.momentum_history)
+            n = len(vals)
+            x_mean = (n - 1) / 2
+            y_mean = sum(vals) / n
+            num = sum((i - x_mean) * (v - y_mean) for i, v in enumerate(vals))
+            den = sum((i - x_mean) ** 2 for i in range(n))
+            self.momentum_slope = num / den if den > 0 else 0.0
+        else:
+            self.momentum_slope = 0.0
+
+    def update_quote_features(self, change_pct: float, rvol: float) -> None:
+        """Update acceleration features from quote data (called after update)."""
+        self.change_accel = change_pct - self.prev_change_pct
+        self.prev_change_pct = change_pct
+
+        self.rvol_crossed_up = (self.prev_rvol < 2.0 and rvol >= 2.0)
+        self.prev_rvol = rvol
 
     def velocity(self) -> float:
         """
@@ -158,6 +194,22 @@ class RollingState:
     def hod_breaks(self, symbol: str) -> int:
         """Get HOD break count for a symbol."""
         return self.get_state(symbol).hod_break_count
+
+    def velocity_acceleration(self, symbol: str) -> float:
+        """Get velocity acceleration (velocity delta between scans)."""
+        return self.get_state(symbol).velocity_accel
+
+    def change_acceleration(self, symbol: str) -> float:
+        """Get change_pct acceleration between scans."""
+        return self.get_state(symbol).change_accel
+
+    def rvol_cross_up(self, symbol: str) -> bool:
+        """True if rvol just crossed 2.0 from below."""
+        return self.get_state(symbol).rvol_crossed_up
+
+    def get_momentum_slope(self, symbol: str) -> float:
+        """Get linear slope of last 5 momentum scores."""
+        return self.get_state(symbol).momentum_slope
 
     def clear(self, symbol: Optional[str] = None) -> None:
         """Clear state for a symbol or all symbols."""

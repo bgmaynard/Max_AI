@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     schwab_token_path: Path = Path("C:/Max_AI/tokens/schwab_token.json")
 
     # Scanner Service
-    scanner_host: str = "127.0.0.1"
+    scanner_host: str = "0.0.0.0"
     scanner_port: int = 8787
     scan_interval_ms: int = 1500
     max_watch_symbols: int = 300

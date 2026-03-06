@@ -77,6 +77,8 @@ class Ranker:
                 spread=features.get("spread", 0),
                 float_shares=quote.float_shares,
                 market_cap=quote.market_cap,
+                avg_volume=quote.avg_volume,
+                short_interest=features.get("short_interest", 0),  # From Finviz if available
                 ai_score=score_data["ai_score"],
                 profile=profile.name,
                 alerts=[],  # Populated by alert system

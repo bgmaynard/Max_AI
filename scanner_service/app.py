@@ -1,9 +1,14 @@
-"""MAX_AI Scanner Service - FastAPI Application."""
+"""
+Max Scanner Service - FastAPI Application.
+
+Advisory-based architecture: Max emits advisories into a pull buffer.
+Bots pull advisories when they want. Max never touches bot state.
+"""
 
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 from pathlib import Path
@@ -29,6 +34,7 @@ from scanner_service.strategy.ranker import Ranker
 from scanner_service.alerts.router import AlertRouter
 from scanner_service.storage.state import ScannerState, ScannerStatus
 from scanner_service.storage.cache import QuoteCache
+from scanner_service.advisory_buffer import get_advisory_buffer, AdvisoryBuffer, NegativeAdvisory
 
 # Configure logging
 logging.basicConfig(
@@ -49,6 +55,55 @@ alert_router: Optional[AlertRouter] = None
 scanner_state: Optional[ScannerState] = None
 quote_cache: Optional[QuoteCache] = None
 
+# Advisory buffer
+advisory_buffer: Optional[AdvisoryBuffer] = None
+
+# Phase-aware advisory thresholds
+# Pre-market: accumulate aggressively, low bar, long TTL
+# Post-open: tighten up, require stronger signals
+PHASE_CONFIG = {
+    "PREMARKET": {
+        "min_ai_score": 0.30,
+        "ttl_seconds": 600,       # 10 minutes — sparse data, keep longer
+        "label": "Pre-market accumulation (low liquidity expected)",
+    },
+    "OPEN": {
+        "min_ai_score": 0.50,
+        "ttl_seconds": 300,       # 5 minutes — standard
+        "label": "Market open (standard thresholds)",
+    },
+    "CLOSED": {
+        "min_ai_score": 0.50,
+        "ttl_seconds": 300,
+        "label": "Market closed",
+    },
+}
+ADVISORY_TTL_SECONDS = 300  # default fallback
+
+
+def get_market_phase() -> str:
+    """
+    Return current market phase based on Eastern Time.
+
+    PREMARKET: 04:00 - 09:29 ET  (accumulate aggressively)
+    OPEN:      09:30 - 16:00 ET  (standard thresholds)
+    CLOSED:    16:00 - 03:59 ET  (idle)
+    """
+    try:
+        import pytz
+        et = pytz.timezone("US/Eastern")
+        now_et = datetime.now(et)
+        t = now_et.time()
+        from datetime import time as dt_time
+        if dt_time(4, 0) <= t < dt_time(9, 30):
+            return "PREMARKET"
+        elif dt_time(9, 30) <= t < dt_time(16, 0):
+            return "OPEN"
+        else:
+            return "CLOSED"
+    except Exception:
+        return "OPEN"  # fail-open to standard thresholds
+
 # Fundamentals cache (refreshes less frequently than quotes)
 fundamentals_cache: dict[str, dict] = {}
 fundamentals_last_fetch: Optional[datetime] = None
@@ -56,8 +111,53 @@ fundamentals_last_fetch: Optional[datetime] = None
 # Scanner loop task
 scanner_task: Optional[asyncio.Task] = None
 
+# Heartbeat tracking (crash hardening)
+_last_scan_ts: Optional[datetime] = None
+_scan_error_times: list[datetime] = []  # timestamps of errors in last hour
+_scan_ok: bool = True
+
+# TradingView pre-market gapper state
+_tv_last_fetch: Optional[datetime] = None
+_tv_fetch_interval_seconds: int = 300  # every 5 minutes
+_tv_discovered_symbols: set[str] = set()  # track what TV already found this session
+
+# Intraday small-cap mover state (TV + Finviz during OPEN phase)
+_intraday_last_fetch: Optional[datetime] = None
+_intraday_fetch_interval_seconds: int = 300  # every 5 minutes
+_intraday_discovered_symbols: set[str] = set()
+
+# Token refresh task
+token_refresh_task: Optional[asyncio.Task] = None
+
 # WebSocket connections for streaming
 websocket_connections: dict[str, list[WebSocket]] = {}
+
+# WebSocket connections for advisory push (real-time delivery to consumers)
+advisory_ws_connections: list[WebSocket] = []
+
+
+async def token_reload_loop():
+    """Background loop that reloads shared token from disk (Morpheus is the writer)."""
+    logger.info("[TOKEN_RELOAD] Shared token reload daemon started (read-only, Morpheus owns refresh)")
+    while True:
+        try:
+            await asyncio.sleep(60)  # Check every 60 seconds
+            if schwab_client:
+                try:
+                    old_access = schwab_client._access_token
+                    schwab_client._load_tokens()  # Re-read from shared file
+                    if schwab_client._access_token and schwab_client._access_token != old_access:
+                        logger.info("[TOKEN_RELOAD] Picked up refreshed token from shared file")
+                    elif not schwab_client._access_token:
+                        logger.warning("[TOKEN_RELOAD] Shared token file missing or empty")
+                except Exception as e:
+                    logger.error(f"[TOKEN_RELOAD] Reload failed: {e}")
+        except asyncio.CancelledError:
+            logger.info("[TOKEN_RELOAD] Shared token reload daemon stopped")
+            break
+        except Exception as e:
+            logger.error(f"[TOKEN_RELOAD] Loop error: {e}")
+            await asyncio.sleep(30)
 
 
 @asynccontextmanager
@@ -65,8 +165,9 @@ async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     global schwab_client, universe, feature_engine, profile_loader
     global scorer, ranker, alert_router, scanner_state, quote_cache, scanner_task
+    global token_refresh_task, advisory_buffer
 
-    logger.info("Starting MAX_AI Scanner Service...")
+    logger.info("Starting Max Scanner Service...")
 
     # Initialize components
     schwab_client = SchwabClient()
@@ -78,10 +179,22 @@ async def lifespan(app: FastAPI):
     alert_router = AlertRouter()
     scanner_state = ScannerState()
     quote_cache = QuoteCache(ttl_seconds=1.5)  # Short TTL to allow velocity calculation
+    advisory_buffer = get_advisory_buffer(ttl_seconds=ADVISORY_TTL_SECONDS)
+    phase = get_market_phase()
+    phase_cfg = PHASE_CONFIG.get(phase, PHASE_CONFIG["OPEN"])
+    logger.info(
+        f"[ADVISORY] Buffer initialized | phase={phase} | "
+        f"min_score={phase_cfg['min_ai_score']} | ttl={phase_cfg['ttl_seconds']}s | "
+        f"{phase_cfg['label']}"
+    )
 
     # Start scanner loop
     scanner_state.status = ScannerStatus.STARTING
     scanner_task = asyncio.create_task(scanner_loop())
+
+    # Start shared token reload daemon (read-only — Morpheus owns the refresh)
+    token_refresh_task = asyncio.create_task(token_reload_loop())
+    logger.info("[TOKEN_RELOAD] Shared token reload daemon started (Morpheus is the token owner)")
 
     logger.info(f"Scanner service started on {settings.scanner_host}:{settings.scanner_port}")
 
@@ -90,6 +203,13 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down scanner service...")
     scanner_state.status = ScannerStatus.STOPPED
+
+    if token_refresh_task:
+        token_refresh_task.cancel()
+        try:
+            await token_refresh_task
+        except asyncio.CancelledError:
+            pass
 
     if scanner_task:
         scanner_task.cancel()
@@ -105,27 +225,307 @@ async def lifespan(app: FastAPI):
 
 
 async def scanner_loop():
-    """Main scanner loop."""
-    global scanner_state
+    """Main scanner loop with heartbeat and top-level exception guard."""
+    global scanner_state, _last_scan_ts, _scan_ok, _scan_error_times
 
     scanner_state.status = ScannerStatus.RUNNING
     interval = settings.scan_interval_ms / 1000
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 20  # Exit after 20 consecutive failures
 
-    while scanner_state.is_running:
-        try:
-            await run_scan_cycle()
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error(f"Scan cycle error: {e}")
-            scanner_state.record_error(e)
+    try:
+        while scanner_state.is_running:
+            try:
+                await run_scan_cycle()
+                _last_scan_ts = datetime.utcnow()
+                _scan_ok = True
+                consecutive_failures = 0
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                consecutive_failures += 1
+                _scan_ok = False
+                _scan_error_times.append(datetime.utcnow())
+                # Prune errors older than 1 hour
+                cutoff = datetime.utcnow() - timedelta(hours=1)
+                _scan_error_times[:] = [t for t in _scan_error_times if t > cutoff]
 
-        await asyncio.sleep(interval)
+                logger.error(f"Scan cycle error ({consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}): {e}")
+                scanner_state.record_error(e)
+
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    logger.critical(
+                        f"[CRITICAL] MAX FATAL: {MAX_CONSECUTIVE_FAILURES} consecutive scan failures. "
+                        f"Last error: {e}. Exiting non-zero for restart."
+                    )
+                    import sys
+                    sys.exit(1)
+
+            await asyncio.sleep(interval)
+    except Exception as e:
+        logger.critical(f"[CRITICAL] MAX FATAL: Unhandled exception in scanner_loop: {e}")
+        import sys
+        sys.exit(1)
+
+
+async def _fetch_tradingview_gappers():
+    """Fetch TradingView pre-market gappers and inject into universe + advisory buffer.
+
+    Runs every 5 minutes during PREMARKET phase only.
+    Symbols are added to the universe so they get Schwab quotes on the next cycle.
+    High-change gappers also get emitted directly as advisories.
+    """
+    global _tv_last_fetch, _tv_discovered_symbols
+
+    phase = get_market_phase()
+    if phase != "PREMARKET":
+        return
+
+    now = datetime.utcnow()
+    if _tv_last_fetch and (now - _tv_last_fetch).total_seconds() < _tv_fetch_interval_seconds:
+        return  # Too soon
+
+    _tv_last_fetch = now
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from scanner_service.ingest.tradingview_client import fetch_premarket_gappers
+
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as pool:
+            gappers = await loop.run_in_executor(pool, fetch_premarket_gappers)
+
+        if not gappers:
+            return
+
+        # Inject new symbols into universe
+        new_symbols = []
+        for g in gappers:
+            sym = g["symbol"]
+            if sym not in _tv_discovered_symbols:
+                _tv_discovered_symbols.add(sym)
+                new_symbols.append(sym)
+
+        if new_symbols and universe:
+            universe.add_symbols(new_symbols)
+            logger.info(f"[TV] Added {len(new_symbols)} new symbols to universe: {new_symbols}")
+
+        # Emit advisories for all gappers (already filtered >=5% by TV query)
+        # Confidence: 0.55 base + change bonus. These are real pre-market movers
+        # with confirmed volume — they should clear the 0.50 poller threshold.
+        if advisory_buffer:
+            phase_cfg = PHASE_CONFIG.get("PREMARKET", PHASE_CONFIG["OPEN"])
+            ttl = phase_cfg["ttl_seconds"]
+            emitted = 0
+            for g in gappers:
+                    adv = advisory_buffer.emit(
+                        symbol=g["symbol"],
+                        source="tradingview_premarket",
+                        confidence=min(0.55 + (g["change_pct"] / 200.0), 0.95),
+                        reason=f"TV premarket: +{g['change_pct']:.1f}% vol={g['premarket_volume']:,}",
+                        price=g["price"],
+                        change_pct=g["change_pct"],
+                        volume=g["premarket_volume"],
+                        rvol=0,
+                        float_shares=0,
+                        profile="tradingview_gappers",
+                        ttl_override=ttl,
+                    )
+                    if adv:
+                        emitted += 1
+                        await push_advisory(adv.model_dump(mode="json"))
+            if emitted:
+                logger.info(f"[TV] Emitted {emitted} pre-market advisories")
+
+    except Exception as e:
+        logger.warning(f"[TV] TradingView fetch failed (non-fatal): {e}")
+
+
+async def _fetch_intraday_smallcap_movers():
+    """Fetch small-cap movers during OPEN phase from TradingView + Finviz.
+
+    Runs every 5 minutes during OPEN phase.
+    TradingView: real-time change%, volume, rvol for $1-$20 stocks.
+    Finviz: top gainers with float data (lags ~15 min after open).
+    Both sources emit to advisory buffer for Morpheus poller to consume.
+    """
+    global _intraday_last_fetch, _intraday_discovered_symbols
+
+    phase = get_market_phase()
+    if phase != "OPEN":
+        return
+
+    now = datetime.utcnow()
+    if _intraday_last_fetch and (now - _intraday_last_fetch).total_seconds() < _intraday_fetch_interval_seconds:
+        return  # Too soon
+
+    _intraday_last_fetch = now
+
+    phase_cfg = PHASE_CONFIG.get("OPEN", PHASE_CONFIG["OPEN"])
+    ttl = phase_cfg["ttl_seconds"]
+    total_emitted = 0
+
+    # --- Source 1: TradingView intraday small-cap movers ---
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from scanner_service.ingest.tradingview_client import fetch_intraday_movers
+
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as pool:
+            movers = await loop.run_in_executor(pool, fetch_intraday_movers)
+
+        if movers and advisory_buffer:
+            new_symbols = []
+            for m in movers:
+                sym = m["symbol"]
+                if sym not in _intraday_discovered_symbols:
+                    _intraday_discovered_symbols.add(sym)
+                    new_symbols.append(sym)
+
+                # Emit advisory — confidence based on change% and rvol
+                base_conf = min(0.50 + (m["change_pct"] / 200.0), 0.90)
+                rvol_bonus = min(m.get("rvol", 0) * 0.02, 0.10)  # up to +0.10 for high rvol
+                confidence = min(base_conf + rvol_bonus, 0.95)
+
+                adv = advisory_buffer.emit(
+                    symbol=sym,
+                    source="tradingview_intraday",
+                    confidence=confidence,
+                    reason=f"TV intraday: +{m['change_pct']:.1f}% vol={m['volume']:,} rvol={m.get('rvol', 0):.1f}x",
+                    price=m["price"],
+                    change_pct=m["change_pct"],
+                    volume=m["volume"],
+                    rvol=m.get("rvol", 0),
+                    profile="tradingview_intraday",
+                    ttl_override=ttl,
+                )
+                if adv:
+                    total_emitted += 1
+                    await push_advisory(adv.model_dump(mode="json"))
+
+            # Add new symbols to universe for Schwab quotes
+            if new_symbols and universe:
+                universe.add_symbols(new_symbols)
+                logger.info(f"[INTRADAY_TV] Added {len(new_symbols)} new symbols: {new_symbols}")
+
+    except Exception as e:
+        logger.warning(f"[INTRADAY_TV] TradingView intraday fetch failed (non-fatal): {e}")
+
+    # --- Source 2: Finviz top gainers (small-cap filter) ---
+    try:
+        from scanner_service.ingest import finviz_client
+
+        gainers = await finviz_client.get_top_gainers(
+            max_price=20.0,
+            min_change=10.0,
+            limit=20,
+        )
+
+        if gainers and advisory_buffer:
+            new_symbols = []
+            for g in gainers:
+                sym = g["symbol"]
+                if sym not in _intraday_discovered_symbols:
+                    _intraday_discovered_symbols.add(sym)
+                    new_symbols.append(sym)
+
+                # Emit advisory — confidence from change%
+                confidence = min(0.50 + (g["change_pct"] / 200.0), 0.90)
+
+                adv = advisory_buffer.emit(
+                    symbol=sym,
+                    source="finviz_intraday",
+                    confidence=confidence,
+                    reason=f"Finviz gainer: +{g['change_pct']:.1f}% vol={g['volume']:,}",
+                    price=g["price"],
+                    change_pct=g["change_pct"],
+                    volume=g["volume"],
+                    profile="finviz_gainers",
+                    ttl_override=ttl,
+                )
+                if adv:
+                    total_emitted += 1
+                    await push_advisory(adv.model_dump(mode="json"))
+
+            if new_symbols and universe:
+                universe.add_symbols(new_symbols)
+                logger.info(f"[INTRADAY_FV] Added {len(new_symbols)} Finviz symbols: {new_symbols}")
+
+    except Exception as e:
+        logger.warning(f"[INTRADAY_FV] Finviz intraday fetch failed (non-fatal): {e}")
+
+    # --- Source 3: Re-emit TV pre-market discoveries that are still active ---
+    # Symbols found in pre-market should stay visible during OPEN
+    if _tv_discovered_symbols and advisory_buffer:
+        re_emitted = 0
+        for sym in list(_tv_discovered_symbols):
+            # Check if symbol has an active advisory already
+            existing = advisory_buffer.get_active(min_confidence=0.0)
+            already_active = any(a.symbol == sym for a in existing)
+            if already_active:
+                continue
+
+            # Re-emit with moderate confidence (it was found pre-market, still relevant)
+            adv = advisory_buffer.emit(
+                symbol=sym,
+                source="tradingview_premarket_carryover",
+                confidence=0.55,
+                reason=f"Pre-market gapper (carryover from {len(_tv_discovered_symbols)} TV discoveries)",
+                profile="tradingview_gappers",
+                ttl_override=ttl,
+            )
+            if adv:
+                re_emitted += 1
+                total_emitted += 1
+                await push_advisory(adv.model_dump(mode="json"))
+
+        if re_emitted:
+            logger.info(f"[INTRADAY] Re-emitted {re_emitted} pre-market TV discoveries as carryovers")
+
+    if total_emitted > 0:
+        logger.info(f"[INTRADAY] Total emitted: {total_emitted} small-cap advisories (TV + Finviz + carryover)")
+
+
+def _check_negative_intelligence(row, phase: str) -> tuple[Optional[str], str]:
+    """
+    Check if a symbol should get a DO_NOT_TRADE signal.
+
+    Returns (reason, detail) or (None, "") if no negative signal.
+
+    Reasons:
+    - extended_move: Change% too extreme (>50%), likely exhausted
+    - low_follow_through: Low score despite big change (move isn't sticking)
+    - volume_concern: High change but very low relative volume
+    """
+    symbol = row.symbol
+    change = abs(row.change_pct) if hasattr(row, 'change_pct') else 0
+    score = row.ai_score if hasattr(row, 'ai_score') else 0
+    rvol = row.rvol if hasattr(row, 'rvol') else 0
+
+    # Extended move: +50% or more — too late, likely to fade
+    if change >= 50.0:
+        return "extended_move", f"{symbol} +{change:.0f}% — parabolic, high reversal risk"
+
+    # Low follow-through: big change but low AI score suggests move isn't sustainable
+    if change >= 15.0 and score < 0.30:
+        return "low_follow_through", f"{symbol} +{change:.0f}% but score={score:.2f} — weak internals"
+
+    # Volume concern: big change but no volume confirmation
+    if change >= 10.0 and rvol < 1.0 and rvol > 0:
+        return "volume_concern", f"{symbol} +{change:.0f}% but rvol={rvol:.1f}x — no volume confirmation"
+
+    return None, ""
 
 
 async def run_scan_cycle():
     """Execute a single scan cycle."""
     global fundamentals_cache, fundamentals_last_fetch
+
+    # TradingView pre-market gapper injection (every 5 min during pre-market)
+    await _fetch_tradingview_gappers()
+
+    # Intraday small-cap movers (TV + Finviz, every 5 min during OPEN)
+    await _fetch_intraday_smallcap_movers()
 
     # Get symbols to scan
     symbols = universe.candidates
@@ -153,13 +553,16 @@ async def run_scan_cycle():
         except Exception as e:
             logger.warning(f"Fundamentals fetch failed: {e}")
 
-    # Enrich quotes with fundamentals (float, market cap)
+    # Enrich quotes with fundamentals (float, market cap, avg volume)
     # Convert to millions for easier display
     for symbol, quote in cached.items():
         if symbol in fundamentals_cache:
             fund = fundamentals_cache[symbol]
             quote.float_shares = fund.get("float_shares", 0) / 1_000_000  # Convert to millions
             quote.market_cap = fund.get("market_cap", 0) / 1_000_000  # Convert to millions
+            # avg_volume stays as raw count (not converted to millions)
+            if fund.get("avg_volume"):
+                quote.avg_volume = int(fund.get("avg_volume", 0))
 
     # Build full snapshot
     from scanner_service.schemas.market_snapshot import MarketSnapshot
@@ -189,6 +592,105 @@ async def run_scan_cycle():
 
     # Broadcast to WebSocket clients
     await broadcast_updates(outputs)
+
+    # Emit advisories for top-scoring symbols (phase-aware)
+    if advisory_buffer:
+        phase = get_market_phase()
+        phase_cfg = PHASE_CONFIG.get(phase, PHASE_CONFIG["OPEN"])
+        min_score = phase_cfg["min_ai_score"]
+        ttl = phase_cfg["ttl_seconds"]
+        emitted_count = 0
+
+        for profile_name, output in outputs.items():
+            if not output.rows:
+                continue
+            for row in output.rows[:10]:
+                if row.ai_score >= min_score:
+                    # Check for active negative advisory — skip if blocked
+                    is_neg, neg_reason = advisory_buffer.is_negative(row.symbol)
+                    if is_neg:
+                        advisory_buffer.record_negative_suppression()
+                        continue
+
+                    adv = advisory_buffer.emit(
+                        symbol=row.symbol,
+                        source="scanner_cycle",
+                        confidence=row.ai_score,
+                        reason=f"{profile_name}: score={row.ai_score:.2f} chg={row.change_pct:+.1f}% rvol={row.rvol:.1f}x",
+                        price=row.last_price,
+                        change_pct=row.change_pct,
+                        volume=row.volume,
+                        rvol=row.rvol,
+                        float_shares=row.float_shares,
+                        profile=profile_name,
+                        ttl_override=ttl,
+                    )
+                    if adv:
+                        emitted_count += 1
+                        await push_advisory(adv.model_dump(mode="json"))
+
+        if emitted_count > 0 and phase == "PREMARKET":
+            logger.info(
+                f"[ADVISORY] Premarket accumulation: emitted {emitted_count} advisories "
+                f"(min_score={min_score}, ttl={ttl}s)"
+            )
+
+        # Emit negative advisories (DO_NOT_TRADE signals)
+        negative_count = 0
+        for profile_name, output in outputs.items():
+            if not output.rows:
+                continue
+            for row in output.rows[:20]:  # Check top 20 for negative signals
+                neg_reason, neg_detail = _check_negative_intelligence(row, phase)
+                if neg_reason:
+                    neg = advisory_buffer.emit_negative(
+                        symbol=row.symbol,
+                        reason=neg_reason,
+                        detail=neg_detail,
+                        source="scanner_cycle",
+                        change_pct=row.change_pct,
+                        price=row.last_price,
+                        ttl_seconds=600,  # Negative signals persist 10 min
+                    )
+                    negative_count += 1
+                    await push_negative_advisory(neg.model_dump(mode="json"))
+
+        if negative_count > 0:
+            logger.info(f"[ADVISORY][NEGATIVE] Emitted {negative_count} DO_NOT_TRADE signals")
+
+
+async def push_advisory(advisory_data: dict) -> None:
+    """Push advisory to all connected WebSocket consumers (Morpheus, IBKR_V2)."""
+    if not advisory_ws_connections:
+        return
+    import json
+    payload = json.dumps({"type": "advisory", "data": advisory_data})
+    disconnected = []
+    for ws in advisory_ws_connections:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            disconnected.append(ws)
+    for ws in disconnected:
+        advisory_ws_connections.remove(ws)
+    if disconnected:
+        logger.info(f"[WS_PUSH] Removed {len(disconnected)} dead advisory connections")
+
+
+async def push_negative_advisory(negative_data: dict) -> None:
+    """Push negative advisory to all connected WebSocket consumers."""
+    if not advisory_ws_connections:
+        return
+    import json
+    payload = json.dumps({"type": "negative", "data": negative_data})
+    disconnected = []
+    for ws in advisory_ws_connections:
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            disconnected.append(ws)
+    for ws in disconnected:
+        advisory_ws_connections.remove(ws)
 
 
 async def broadcast_updates(outputs: dict[str, ScannerOutput]):
@@ -247,22 +749,87 @@ async def root():
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
+    """Health check endpoint with heartbeat, advisory stats, and error tracking."""
+    # Advisory stats
+    adv_active = 0
+    adv_unique = 0
+    neg_active = 0
+    stats = {}
+    if advisory_buffer:
+        stats = advisory_buffer.get_stats()
+        adv_active = stats.get("active_advisories", 0)
+        adv_unique = stats.get("unique_symbols", 0)
+        neg_active = stats.get("negative_active", 0)
+
+    # Schwab health (can we fetch quotes?)
+    schwab_ok = schwab_client is not None and schwab_client.is_authenticated()
+
+    # RSS/news health
+    rss_ok = False
+    try:
+        from scanner_service.ingest.news_client import get_news_client
+        nc = get_news_client()
+        ns = nc.get_status()
+        rss_ok = ns.get("running", False) or ns.get("poll_count", 0) > 0
+    except Exception:
+        pass
+
+    # Errors in last hour
+    cutoff = datetime.utcnow() - timedelta(hours=1)
+    errors_last_hour = sum(1 for t in _scan_error_times if t > cutoff)
+
+    ok = _scan_ok and (scanner_state.status == ScannerStatus.RUNNING if scanner_state else False)
+
+    # Intraday scanner status
+    intraday_status = "active" if _intraday_last_fetch else "idle"
+    intraday_last = _intraday_last_fetch.isoformat() if _intraday_last_fetch else None
+
     return {
-        "status": "healthy",
+        "ok": ok,
         "service": "MAX_AI Scanner",
         "version": "0.1.0",
         "scanner_status": scanner_state.status.value if scanner_state else "unknown",
+        "last_scan_ts": _last_scan_ts.isoformat() if _last_scan_ts else None,
+        "advisory_active_count": adv_active,
+        "unique_symbols": adv_unique,
+        "negative_active": neg_active,
+        "intraday_status": intraday_status,
+        "intraday_last_fetch": intraday_last,
+        "rss_ok": rss_ok,
+        "schwab_ok": schwab_ok,
+        "errors_last_hour": errors_last_hour,
         "timestamp": datetime.utcnow().isoformat(),
     }
 
 
 @app.get("/metrics")
 async def metrics():
-    """Get scanner metrics."""
-    if not scanner_state:
-        raise HTTPException(status_code=503, detail="Scanner not initialized")
-    return scanner_state.get_metrics()
+    """Get scanner metrics including advisory validation counters."""
+    scanner_metrics = {}
+    if scanner_state:
+        scanner_metrics = scanner_state.get_metrics()
+
+    advisory_metrics = {}
+    if advisory_buffer:
+        stats = advisory_buffer.get_stats()
+        advisory_metrics = {
+            "advisories_emitted_total": stats.get("total_emitted", 0),
+            "advisories_rediscovered_total": stats.get("total_rediscovered", 0),
+            "advisories_suppressed_dedup": stats.get("total_deduped", 0),
+            "advisories_suppressed_negative": stats.get("total_suppressed_negative", 0),
+            "avg_advisory_confidence": stats.get("avg_advisory_confidence", 0.0),
+            "rediscovery_rate_pct": stats.get("rediscovery_rate", 0.0),
+            "dedup_ratio_pct": stats.get("dedup_ratio", 0.0),
+            "active_advisories": stats.get("active_advisories", 0),
+            "rediscovered_active": stats.get("rediscovered_active", 0),
+            "negative_active": stats.get("negative_active", 0),
+        }
+
+    return {
+        **scanner_metrics,
+        "advisory": advisory_metrics,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
 
 
 # ============== Profiles ==============
@@ -452,6 +1019,49 @@ async def websocket_scanner(
     finally:
         if profile in websocket_connections:
             websocket_connections[profile].remove(websocket)
+
+
+@app.websocket("/stream/advisories")
+async def websocket_advisories(websocket: WebSocket):
+    """WebSocket endpoint for real-time advisory push to consumers (Morpheus, IBKR_V2).
+
+    Replaces 60s polling. Advisories are pushed immediately on emission.
+    On connect, sends all currently active advisories as initial state.
+    """
+    await websocket.accept()
+    advisory_ws_connections.append(websocket)
+    logger.info(f"[WS_PUSH] Advisory consumer connected (total={len(advisory_ws_connections)})")
+
+    try:
+        # Send current active advisories as initial payload
+        if advisory_buffer:
+            import json
+            active = advisory_buffer.get_active(min_confidence=0.0)
+            negatives = advisory_buffer.get_negative()
+            init_payload = json.dumps({
+                "type": "init",
+                "advisories": [a.model_dump(mode="json") for a in active],
+                "negative": [n.model_dump(mode="json") for n in negatives],
+            })
+            await websocket.send_text(init_payload)
+
+        # Keep alive — wait for pings or disconnect
+        while True:
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=30)
+                if msg == "ping":
+                    await websocket.send_text('{"type":"pong"}')
+            except asyncio.TimeoutError:
+                await websocket.send_text('{"type":"heartbeat"}')
+
+    except WebSocketDisconnect:
+        logger.info("[WS_PUSH] Advisory consumer disconnected")
+    except Exception as e:
+        logger.warning(f"[WS_PUSH] Advisory WebSocket error: {e}")
+    finally:
+        if websocket in advisory_ws_connections:
+            advisory_ws_connections.remove(websocket)
+        logger.info(f"[WS_PUSH] Advisory consumers remaining: {len(advisory_ws_connections)}")
 
 
 # ============== Auth (Schwab OAuth) ==============
@@ -771,6 +1381,284 @@ async def get_universe_symbols():
         "count": len(universe.universe),
         "symbols": universe.universe,
     }
+
+
+# ============== Advisories (Pull API) ==============
+
+
+@app.get("/advisories")
+async def get_advisories(
+    min_confidence: float = Query(0.0, ge=0.0, le=1.0, description="Minimum confidence"),
+    max_age_seconds: Optional[int] = Query(None, ge=1, description="Max age in seconds"),
+    profile: Optional[str] = Query(None, description="Filter by profile name"),
+):
+    """Pull active (non-expired) advisories."""
+    if not advisory_buffer:
+        return {"advisories": [], "count": 0}
+
+    active = advisory_buffer.get_active(
+        min_confidence=min_confidence,
+        max_age_seconds=max_age_seconds,
+        profile=profile,
+    )
+    return {
+        "advisories": [a.model_dump() for a in active],
+        "count": len(active),
+    }
+
+
+@app.get("/advisories/history")
+async def get_advisory_history(limit: int = Query(100, ge=1, le=500)):
+    """Get recent advisories including expired."""
+    if not advisory_buffer:
+        return {"advisories": [], "count": 0}
+
+    history = advisory_buffer.get_history(limit=limit)
+    return {
+        "advisories": [a.model_dump() for a in history],
+        "count": len(history),
+    }
+
+
+@app.delete("/advisories")
+async def clear_advisories():
+    """Clear the advisory buffer."""
+    if advisory_buffer:
+        advisory_buffer.clear()
+    return {"status": "cleared"}
+
+
+@app.get("/advisories/negative")
+async def get_negative_advisories(
+    symbol: Optional[str] = Query(None, description="Filter by symbol"),
+):
+    """Get active DO_NOT_TRADE signals."""
+    if not advisory_buffer:
+        return {"negative": [], "count": 0}
+
+    negs = advisory_buffer.get_negative(symbol=symbol)
+    return {
+        "negative": [n.model_dump() for n in negs],
+        "count": len(negs),
+    }
+
+
+@app.get("/advisories/negative/check/{symbol}")
+async def check_negative(symbol: str):
+    """Check if a specific symbol has an active DO_NOT_TRADE signal."""
+    if not advisory_buffer:
+        return {"symbol": symbol.upper(), "blocked": False, "reason": ""}
+
+    blocked, reason = advisory_buffer.is_negative(symbol)
+    return {
+        "symbol": symbol.upper(),
+        "blocked": blocked,
+        "reason": reason,
+    }
+
+
+@app.get("/advisories/stats")
+async def advisory_stats():
+    """Get advisory buffer statistics with current market phase."""
+    if not advisory_buffer:
+        return {"error": "Buffer not initialized"}
+
+    stats = advisory_buffer.get_stats()
+    phase = get_market_phase()
+    phase_cfg = PHASE_CONFIG.get(phase, PHASE_CONFIG["OPEN"])
+    stats["market_phase"] = phase
+    stats["phase_label"] = phase_cfg["label"]
+    stats["phase_min_ai_score"] = phase_cfg["min_ai_score"]
+    stats["phase_ttl_seconds"] = phase_cfg["ttl_seconds"]
+    return stats
+
+
+# ============== Backward-Compat Stubs (IBKR bot startup checks) ==============
+
+
+@app.get("/morpheus/auto-inject/status")
+async def auto_inject_status_stub():
+    """Deprecated. Use GET /advisories instead."""
+    return {"enabled": False, "deprecated": True, "message": "Use GET /advisories"}
+
+
+@app.post("/morpheus/auto-inject/start")
+async def start_auto_inject_stub():
+    """Deprecated. Advisories are emitted automatically."""
+    return {"status": "deprecated", "message": "Use GET /advisories"}
+
+
+@app.post("/morpheus/auto-inject/stop")
+async def stop_auto_inject_stub():
+    """Deprecated. Advisories are emitted automatically."""
+    return {"status": "deprecated", "message": "Use GET /advisories"}
+
+
+@app.post("/morpheus/auto-inject/reset")
+async def reset_inject_stub():
+    """Deprecated. Use DELETE /advisories instead."""
+    return {"status": "deprecated", "message": "Use DELETE /advisories"}
+
+
+@app.post("/morpheus/inject")
+async def inject_stub(symbols: list[str]):
+    """Deprecated. Advisories are emitted automatically from scanner cycle."""
+    return {"status": "deprecated", "message": "Use GET /advisories"}
+
+
+# ============== TradingView Pre-Market ==============
+
+
+@app.get("/tradingview/status")
+async def tradingview_status():
+    """Get TradingView pre-market scanner status."""
+    return {
+        "last_fetch": _tv_last_fetch.isoformat() if _tv_last_fetch else None,
+        "fetch_interval_seconds": _tv_fetch_interval_seconds,
+        "discovered_count": len(_tv_discovered_symbols),
+        "discovered_symbols": sorted(_tv_discovered_symbols),
+        "phase": get_market_phase(),
+        "active": get_market_phase() == "PREMARKET",
+    }
+
+
+@app.post("/tradingview/fetch-now")
+async def tradingview_fetch_now():
+    """Trigger an immediate TradingView pre-market fetch (ignores cooldown)."""
+    global _tv_last_fetch
+    _tv_last_fetch = None  # Reset cooldown to force fetch
+    await _fetch_tradingview_gappers()
+    return {
+        "status": "fetched",
+        "discovered_count": len(_tv_discovered_symbols),
+        "discovered_symbols": sorted(_tv_discovered_symbols),
+    }
+
+
+@app.post("/tradingview/reset")
+async def tradingview_reset():
+    """Reset TradingView discovered symbols (call at session start)."""
+    global _tv_discovered_symbols, _tv_last_fetch, _intraday_discovered_symbols, _intraday_last_fetch
+    _tv_discovered_symbols.clear()
+    _tv_last_fetch = None
+    _intraday_discovered_symbols.clear()
+    _intraday_last_fetch = None
+    return {"status": "reset"}
+
+
+@app.get("/intraday/status")
+async def intraday_status():
+    """Get intraday small-cap mover scanner status."""
+    return {
+        "last_fetch": _intraday_last_fetch.isoformat() if _intraday_last_fetch else None,
+        "fetch_interval_seconds": _intraday_fetch_interval_seconds,
+        "discovered_count": len(_intraday_discovered_symbols),
+        "discovered_symbols": sorted(_intraday_discovered_symbols),
+        "tv_premarket_carryover_count": len(_tv_discovered_symbols),
+        "phase": get_market_phase(),
+        "active": get_market_phase() == "OPEN",
+    }
+
+
+@app.post("/intraday/fetch-now")
+async def intraday_fetch_now():
+    """Trigger immediate intraday small-cap scan (ignores cooldown and phase)."""
+    global _intraday_last_fetch
+    _intraday_last_fetch = None
+
+    # Temporarily override phase check by calling sources directly
+    total = 0
+    results = {"tv_movers": [], "finviz_gainers": []}
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        from scanner_service.ingest.tradingview_client import fetch_intraday_movers
+
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor() as pool:
+            movers = await loop.run_in_executor(pool, fetch_intraday_movers)
+        if movers:
+            results["tv_movers"] = [f"{m['symbol']} +{m['change_pct']:.1f}%" for m in movers[:10]]
+            total += len(movers)
+    except Exception as e:
+        results["tv_error"] = str(e)
+
+    try:
+        gainers = await finviz_client.get_top_gainers(max_price=20.0, min_change=10.0, limit=20)
+        if gainers:
+            results["finviz_gainers"] = [f"{g['symbol']} +{g['change_pct']:.1f}%" for g in gainers[:10]]
+            total += len(gainers)
+    except Exception as e:
+        results["finviz_error"] = str(e)
+
+    return {
+        "status": "fetched",
+        "total_found": total,
+        "results": results,
+    }
+
+
+# ============== News Integration ==============
+
+# News client instance (lazy init)
+_news_client = None
+
+def _get_news_client():
+    global _news_client
+    if _news_client is None:
+        from scanner_service.ingest.news_client import get_news_client
+        _news_client = get_news_client()
+    return _news_client
+
+
+@app.get("/news/status")
+async def news_status():
+    """Get news client status."""
+    client = _get_news_client()
+    return client.get_status()
+
+
+@app.post("/news/start")
+async def start_news(poll_interval: int = Query(10, ge=5, le=60)):
+    """Start the news polling service."""
+    client = _get_news_client()
+    client.start(poll_interval=poll_interval)
+    return {"status": "started", "poll_interval": poll_interval}
+
+
+@app.post("/news/stop")
+async def stop_news():
+    """Stop the news polling service."""
+    client = _get_news_client()
+    client.stop()
+    return {"status": "stopped"}
+
+
+@app.get("/news/recent")
+async def recent_news(limit: int = Query(20, ge=1, le=100)):
+    """Get recent news alerts."""
+    client = _get_news_client()
+    return {
+        "alerts": client.get_recent_alerts(limit=limit),
+        "count": len(client.recent_alerts)
+    }
+
+
+@app.post("/news/poll")
+async def poll_news_now():
+    """Manually poll for news now."""
+    client = _get_news_client()
+    alerts = await client.poll_news()
+    return {
+        "new_alerts": len(alerts),
+        "alerts": [a.to_dict() for a in alerts]
+    }
+
+
+@app.post("/news/push-to-morpheus")
+async def push_news_to_morpheus_stub():
+    """Deprecated. News advisories are emitted to the advisory buffer automatically."""
+    return {"status": "deprecated", "message": "Use GET /advisories"}
 
 
 # ============== Main ==============

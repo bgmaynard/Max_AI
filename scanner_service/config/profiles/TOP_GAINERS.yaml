@@ -6,20 +6,20 @@ enabled: true
 conditions:
   - field: change_pct
     operator: gte
-    value: 5.0
+    value: 1.0
 
 weights:
-  change_pct: 3.0
-  velocity: 1.0
+  change_pct: 2.0
+  velocity: 1.5
   rvol: 1.0
   hod_proximity: 0.5
   spread: 0.5
   volume: 1.0
 
-min_price: 1.0
-max_price: 500.0
+min_price: 2.0
+max_price: 20.0
 min_volume: 100000
 
 alert_enabled: true
 alert_sound: momo_surge.wav
-alert_threshold: 0.65
+alert_threshold: 0.60

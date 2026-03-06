@@ -22,8 +22,8 @@ weights:
   spread: 0.3
   volume: 0.5
 
-min_price: 5.0
-max_price: 500.0
+min_price: 2.0
+max_price: 20.0
 min_volume: 100000
 
 alert_enabled: true

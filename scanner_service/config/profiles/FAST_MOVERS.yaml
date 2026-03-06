@@ -1,21 +1,18 @@
 name: FAST_MOVERS
-description: High velocity momentum stocks with strong price movement
+description: Acceleration-based momentum detection (pre-breakout)
 
 enabled: true
 
 conditions:
-  - field: change_pct
-    operator: gte
-    value: 2.0
   - field: velocity
     operator: gt
-    value: 0.2
+    value: 0.0
   - field: rvol
     operator: gte
     value: 1.0
 
 weights:
-  change_pct: 1.0
+  change_pct: 0.5
   velocity: 2.0
   rvol: 1.5
   hod_proximity: 1.0
@@ -23,9 +20,9 @@ weights:
   volume: 0.5
 
 min_price: 2.0
-max_price: 300.0
-min_volume: 200000
+max_price: 20.0
+min_volume: 100000
 
 alert_enabled: true
 alert_sound: momo_surge.wav
-alert_threshold: 0.75
+alert_threshold: 0.60

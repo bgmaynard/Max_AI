@@ -198,6 +198,35 @@
             background: rgba(218, 54, 51, 0.2);
         }
 
+        .panel-title .news-badge {
+            color: var(--accent-blue);
+            background: rgba(88, 166, 255, 0.2);
+        }
+
+        /* News catalyst badges */
+        .catalyst-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .catalyst-fda { background: rgba(46, 160, 67, 0.3); color: var(--accent-green-light); }
+        .catalyst-merger { background: rgba(163, 113, 247, 0.3); color: var(--accent-purple); }
+        .catalyst-earnings_beat { background: rgba(46, 160, 67, 0.3); color: var(--accent-green-light); }
+        .catalyst-earnings_miss { background: rgba(218, 54, 51, 0.3); color: var(--accent-red); }
+        .catalyst-clinical { background: rgba(88, 166, 255, 0.3); color: var(--accent-blue); }
+        .catalyst-contract { background: rgba(210, 153, 34, 0.3); color: var(--accent-yellow); }
+        .catalyst-upgrade { background: rgba(46, 160, 67, 0.3); color: var(--accent-green-light); }
+        .catalyst-downgrade { background: rgba(218, 54, 51, 0.3); color: var(--accent-red); }
+        .catalyst-general { background: var(--bg-tertiary); color: var(--text-secondary); }
+
+        /* Urgency styles */
+        .urgency-critical { color: var(--accent-red); font-weight: 600; }
+        .urgency-high { color: var(--accent-yellow); font-weight: 500; }
+
         .halt-status {
             display: inline-block;
             padding: 2px 8px;
@@ -738,6 +767,7 @@
                             <option value="scanner">Scanner Profile</option>
                             <option value="finviz">Finviz Top Gainers</option>
                             <option value="halts">Trading Halts</option>
+                            <option value="news">News Feed</option>
                         </select>
                     </div>
                     <div class="form-group" id="profileGroup">
@@ -1132,10 +1162,23 @@
         function createPanelHTML(panel) {
             const isFinviz = panel.source === 'finviz';
             const isHalts = panel.source === 'halts';
+            const isNews = panel.source === 'news';
 
             let sourceLabel, sourceBadgeClass, headers;
 
-            if (isHalts) {
+            if (isNews) {
+                sourceLabel = 'NEWS';
+                sourceBadgeClass = 'panel-profile news-badge';
+                headers = `
+                    <th onclick="sortPanel('${panel.id}', 'detected_at')">Time</th>
+                    <th onclick="sortPanel('${panel.id}', 'symbols')">Symbol</th>
+                    <th>Headline</th>
+                    <th onclick="sortPanel('${panel.id}', 'catalyst_type')">Catalyst</th>
+                    <th onclick="sortPanel('${panel.id}', 'sentiment')">Sentiment</th>
+                    <th onclick="sortPanel('${panel.id}', 'urgency')">Urgency</th>
+                    <th onclick="sortPanel('${panel.id}', 'source')">Source</th>
+                `;
+            } else if (isHalts) {
                 sourceLabel = 'HALTS';
                 sourceBadgeClass = 'panel-profile halt-badge';
                 headers = `
@@ -1297,7 +1340,18 @@
             try {
                 let fetchedRows = [];
 
-                if (panel.source === 'halts') {
+                if (panel.source === 'news') {
+                    // Fetch from News endpoint
+                    const res = await fetch(`${API_BASE}/news/recent?limit=50`);
+                    const data = await res.json();
+                    fetchedRows = data.alerts || [];
+
+                    // Render news directly (no sticky list needed)
+                    renderNewsTable(panelId, fetchedRows);
+                    document.getElementById(`count-${panelId}`).textContent = fetchedRows.length;
+                    setStatus(true);
+                    return;  // Early return for news
+                } else if (panel.source === 'halts') {
                     // Fetch from Halts endpoint
                     const res = await fetch(`${API_BASE}/halts`);
                     const data = await res.json();
@@ -1638,6 +1692,63 @@
                     </tr>
                 `;
             }).join('');
+        }
+
+        // Render news table
+        function renderNewsTable(panelId, alerts) {
+            const tbody = document.getElementById(`tbody-${panelId}`);
+
+            if (alerts.length === 0) {
+                tbody.innerHTML = `
+                    <tr><td colspan="7" class="empty-state">
+                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                            <polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/>
+                            <line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/>
+                        </svg>
+                        No news alerts - Polling every 30s
+                    </td></tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = alerts.map(alert => {
+                const time = formatNewsTime(alert.detected_at);
+                const symbols = (alert.symbols || []).join(', ');
+                const headline = (alert.headline || '').substring(0, 60) + (alert.headline?.length > 60 ? '...' : '');
+                const catalyst = alert.catalyst_type || 'general';
+                const sentiment = alert.sentiment || 'neutral';
+                const urgency = alert.urgency || 'low';
+                const source = alert.source || 'unknown';
+
+                const sentimentClass = sentiment === 'bullish' ? 'cell-positive' :
+                                       sentiment === 'bearish' ? 'cell-negative' : '';
+                const urgencyClass = urgency === 'critical' ? 'urgency-critical' :
+                                     urgency === 'high' ? 'urgency-high' : '';
+
+                return `
+                    <tr class="${urgency === 'critical' ? 'at-hod' : urgency === 'high' ? 'near-hod' : ''}">
+                        <td>${time}</td>
+                        <td class="cell-symbol">${symbols}</td>
+                        <td title="${alert.headline || ''}">${headline}</td>
+                        <td><span class="catalyst-badge catalyst-${catalyst}">${catalyst}</span></td>
+                        <td class="${sentimentClass}">${sentiment}</td>
+                        <td class="${urgencyClass}">${urgency}</td>
+                        <td>${source}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        // Format news time for display
+        function formatNewsTime(isoString) {
+            if (!isoString) return '-';
+            try {
+                const date = new Date(isoString);
+                return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+            } catch {
+                return isoString;
+            }
         }
 
         // Format halt time for display

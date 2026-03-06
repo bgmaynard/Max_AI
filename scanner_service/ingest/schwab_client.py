@@ -35,7 +35,8 @@ class SchwabClient:
         self._load_tokens()
 
     def _load_tokens(self) -> None:
-        """Load tokens from disk if available."""
+        """Load tokens from disk if available. Uses issued_at for real expiry."""
+        import time as _time
         token_path = self.settings.schwab_token_path
         if token_path.exists():
             try:
@@ -44,12 +45,20 @@ class SchwabClient:
                     self._access_token = data.get("access_token")
                     self._refresh_token = data.get("refresh_token")
 
-                    # Handle both formats: "expiry" (our format) or "expires_in" (Schwab native)
-                    expiry = data.get("expiry")
-                    if expiry:
-                        self._token_expiry = datetime.fromisoformat(expiry)
-                    elif data.get("expires_in"):
-                        # Token might be expired, try refresh
+                    issued_at = data.get("issued_at")
+                    expires_in = data.get("expires_in", 1800)
+
+                    if issued_at:
+                        # Compute real expiry from issued_at
+                        real_expiry_ts = issued_at + expires_in - 60
+                        self._token_expiry = datetime.utcfromtimestamp(real_expiry_ts)
+                        if datetime.utcnow() >= self._token_expiry:
+                            logger.warning("Token expired on load (issued_at + expires_in < now)")
+                    elif data.get("expiry"):
+                        self._token_expiry = datetime.fromisoformat(data["expiry"])
+                    else:
+                        # No issued_at, no expiry — force refresh
+                        logger.warning("Token missing issued_at, will force refresh")
                         self._token_expiry = datetime.utcnow() - timedelta(seconds=1)
 
                     logger.info(f"Loaded Schwab tokens from disk (has refresh: {bool(self._refresh_token)})")
@@ -57,16 +66,21 @@ class SchwabClient:
                 logger.warning(f"Failed to load tokens: {e}")
 
     def _save_tokens(self) -> None:
-        """Persist tokens to disk."""
+        """Persist tokens to disk with issued_at."""
+        import time as _time
         token_path = self.settings.schwab_token_path
         token_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "access_token": self._access_token,
             "refresh_token": self._refresh_token,
+            "issued_at": _time.time(),
             "expiry": self._token_expiry.isoformat() if self._token_expiry else None,
+            "expires_in": 1800,
+            "token_type": "Bearer",
+            "scope": "api",
         }
         with open(token_path, "w") as f:
-            json.dump(data, f)
+            json.dump(data, f, indent=2)
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create HTTP client."""
@@ -212,16 +226,11 @@ class SchwabClient:
     async def _fetch_quote_batch(self, symbols: list[str]) -> dict[str, Quote]:
         """Fetch a single batch of quotes."""
         if not self.is_authenticated():
-            # Try to refresh token first
-            if self._refresh_token:
-                logger.info("Token expired, attempting auto-refresh...")
-                if await self.refresh_access_token():
-                    logger.info("Token auto-refreshed successfully")
-                else:
-                    logger.warning("Auto-refresh failed - returning empty quotes")
-                    return {}
-            else:
-                logger.warning("Not authenticated and no refresh token - returning empty quotes")
+            # Reload token from shared file (Morpheus is the writer)
+            logger.info("[TOKEN_RELOAD] Token expired, reloading from shared file...")
+            self._load_tokens()
+            if not self.is_authenticated():
+                logger.warning("[TOKEN_RELOAD] Shared token still expired — waiting for Morpheus to refresh")
                 return {}
 
         client = await self._get_client()
@@ -239,8 +248,9 @@ class SchwabClient:
             return self._parse_quotes(data)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
-                logger.warning("Token expired, attempting refresh")
-                if await self.refresh_access_token():
+                logger.warning("[TOKEN_RELOAD] 401 on quotes, reloading shared token...")
+                self._load_tokens()
+                if self.is_authenticated():
                     return await self._fetch_quote_batch(symbols)
             logger.error(f"Quote fetch failed: {e}")
             return {}  # Return empty instead of mock data
@@ -379,8 +389,9 @@ class SchwabClient:
             return self._parse_fundamentals(data)
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 401:
-                logger.warning("Token expired during fundamentals fetch, attempting refresh")
-                if await self.refresh_access_token():
+                logger.warning("[TOKEN_RELOAD] 401 on fundamentals, reloading shared token...")
+                self._load_tokens()
+                if self.is_authenticated():
                     return await self._fetch_fundamentals_batch(symbols)
             logger.error(f"Fundamentals fetch failed: {e}")
             return {}
