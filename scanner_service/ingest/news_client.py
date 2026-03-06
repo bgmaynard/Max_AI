@@ -1,8 +1,15 @@
 """
 News Client for Max Scanner
 ============================
-Fetches news from Benzinga RSS and detects catalysts.
+Fetches news from multiple RSS feeds and detects trading catalysts.
 Emits advisories to buffer for pull-based consumption.
+
+Sources:
+  - Benzinga (news + markets) — best for small-cap catalyst detection
+  - Yahoo Finance — dynamic symbol list from scanner universe
+  - Seeking Alpha — market currents
+  - GlobeNewsWire — M&A, FDA, press releases
+  - SEC EDGAR — 8-K material event filings
 """
 
 import asyncio
@@ -13,40 +20,65 @@ import hashlib
 import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Set
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 import pytz
 
 logger = logging.getLogger(__name__)
 
 ET_TZ = pytz.timezone('US/Eastern')
 
+# Well-known ticker symbols to match in headlines (no $ prefix needed)
+# Only match these common ones to avoid false positives on short words
+KNOWN_TICKERS = {
+    'AAPL', 'TSLA', 'NVDA', 'AMD', 'AMZN', 'GOOG', 'GOOGL', 'META', 'MSFT',
+    'NFLX', 'GME', 'AMC', 'BBAI', 'SOFI', 'NIO', 'RIVN', 'LCID', 'PLUG',
+    'PLTR', 'MARA', 'RIOT', 'COIN', 'ROKU', 'SNAP', 'UBER', 'LYFT', 'HOOD',
+    'DKNG', 'PENN', 'RBLX', 'ABNB', 'CPNG', 'GRAB', 'JOBY', 'ACHR', 'EVTL',
+    'HIMS', 'SOUN', 'QUBT', 'RGTI', 'IONQ', 'LUNR', 'CLSK', 'BITF', 'WULF',
+    'CIFR', 'CORZ', 'FUBO', 'PATH', 'XPEV',
+}
+
 # Catalyst keywords for instant detection
 CRITICAL_CATALYSTS = {
     'fda': ['fda approval', 'fda approves', 'fda grants', 'breakthrough therapy',
-            'fda clears', 'fda accepts', 'pdufa', 'nda approved'],
+            'fda clears', 'fda accepts', 'pdufa', 'nda approved', 'fda fast track',
+            'emergency use authorization', 'fda advisory committee'],
     'merger': ['acquisition', 'merger', 'buyout', 'takeover bid', 'acquire',
-               'all-cash deal', 'tender offer'],
+               'all-cash deal', 'tender offer', 'to be acquired', 'definitive agreement'],
     'earnings_beat': ['beats estimates', 'eps beat', 'revenue beat', 'earnings surprise',
-                      'exceeds expectations', 'blows past'],
+                      'exceeds expectations', 'blows past', 'tops estimates',
+                      'better than expected', 'raises guidance', 'raises outlook'],
     'earnings_miss': ['misses estimates', 'eps miss', 'revenue miss', 'falls short',
-                      'below expectations'],
+                      'below expectations', 'lowers guidance', 'cuts outlook',
+                      'warns on revenue', 'profit warning'],
     'contract': ['contract award', 'wins contract', 'awarded contract', 'secures deal',
-                 'government contract', 'defense contract'],
+                 'government contract', 'defense contract', 'billion dollar contract',
+                 'multi-year deal'],
     'clinical': ['positive results', 'met primary endpoint', 'phase 3 success',
-                 'clinical trial success', 'positive phase', 'trial met'],
-    'partnership': ['partnership', 'collaboration', 'strategic alliance', 'joint venture'],
-    'upgrade': ['upgrade', 'price target raised', 'initiates buy', 'raises rating'],
-    'downgrade': ['downgrade', 'price target cut', 'initiates sell', 'lowers rating'],
-    'offering': ['stock offering', 'secondary offering', 'shelf registration', 'dilution'],
-    'bankruptcy': ['bankruptcy', 'chapter 11', 'restructuring', 'default'],
+                 'clinical trial success', 'positive phase', 'trial met',
+                 'positive data', 'statistically significant'],
+    'partnership': ['partnership', 'collaboration', 'strategic alliance', 'joint venture',
+                    'licensing agreement', 'distribution agreement'],
+    'upgrade': ['upgrade', 'price target raised', 'initiates buy', 'raises rating',
+                'overweight', 'outperform', 'strong buy'],
+    'downgrade': ['downgrade', 'price target cut', 'initiates sell', 'lowers rating',
+                  'underweight', 'underperform'],
+    'offering': ['stock offering', 'secondary offering', 'shelf registration', 'dilution',
+                 'public offering', 'at-the-market offering'],
+    'bankruptcy': ['bankruptcy', 'chapter 11', 'restructuring', 'default',
+                   'going concern', 'delisting'],
     'split': ['stock split', 'reverse split'],
+    'halt': ['trading halt', 'halted', 'luld halt', 'circuit breaker'],
+    'short_squeeze': ['short squeeze', 'short interest', 'heavily shorted', 'days to cover'],
 }
 
 # Sentiment keywords
 BULLISH_KEYWORDS = ['surge', 'soar', 'jump', 'rally', 'gain', 'positive', 'beats',
-                    'approval', 'success', 'breakthrough', 'upgrade', 'buy']
+                    'approval', 'success', 'breakthrough', 'upgrade', 'buy', 'surging',
+                    'skyrocket', 'moon', 'rocket', 'explode', 'breakout', 'record high']
 BEARISH_KEYWORDS = ['plunge', 'crash', 'drop', 'fall', 'decline', 'negative', 'miss',
-                    'reject', 'fail', 'downgrade', 'sell', 'warning']
+                    'reject', 'fail', 'downgrade', 'sell', 'warning', 'plummet', 'tank',
+                    'sink', 'tumble', 'collapse', 'halt', 'delisting']
 
 
 @dataclass
@@ -84,20 +116,43 @@ class NewsClient:
     Fetches news from RSS feeds and detects trading catalysts.
     """
 
-    # RSS Feed URLs - Multiple sources for better coverage
-    RSS_FEEDS = [
-        ("https://feeds.finance.yahoo.com/rss/2.0/headline?s=AAPL,TSLA,NVDA,AMD,GME,AMC&region=US&lang=en-US", "yahoo"),
-        ("https://www.reutersagency.com/feed/?taxonomy=best-sectors&post_type=best", "reuters"),
+    # Static RSS feeds (always fetched)
+    STATIC_FEEDS = [
+        ("https://www.benzinga.com/news/feed", "benzinga_news"),
+        ("https://www.benzinga.com/markets/feed", "benzinga_markets"),
         ("https://seekingalpha.com/market_currents.xml", "seekingalpha"),
-        ("https://www.prnewswire.com/rss/news-releases-list.rss", "prnewswire"),
+        ("https://www.globenewswire.com/RssFeed/subjectcode/14-Mergers%20and%20Acquisitions/feedTitle/GlobeNewswire%20-%20M%26A", "gnw_mergers"),
+        ("https://www.globenewswire.com/RssFeed/subjectcode/01-Business%20Operations/feedTitle/GlobeNewswire%20-%20Business", "gnw_business"),
+        ("https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&dateb=&owner=include&count=20&search_text=&start=0&output=atom", "sec_edgar"),
     ]
 
     def __init__(self):
         self.seen_ids: Set[str] = set()
         self.recent_alerts: List[NewsAlert] = []
-        self.max_recent = 100
+        self.max_recent = 200
         self._running = False
-        self._poll_interval = 10  # seconds between polls
+        self._poll_interval = 30  # seconds between polls
+        self._poll_count = 0
+        self._universe_symbols: Set[str] = set()
+        self._feed_stats: Dict[str, int] = {}  # source -> alert count
+
+    def set_universe_symbols(self, symbols: Set[str]):
+        """Update the set of symbols the scanner is tracking (for dynamic Yahoo feed)."""
+        self._universe_symbols = symbols
+
+    def _build_dynamic_feeds(self) -> List[tuple]:
+        """Build Yahoo Finance RSS URL from current universe symbols."""
+        feeds = []
+        # Yahoo Finance with discovered symbols (max 20 in URL)
+        syms = sorted(self._universe_symbols)[:20] if self._universe_symbols else []
+        # Always include some high-interest tickers
+        base_syms = ['TSLA', 'NVDA', 'AMD', 'GME', 'AMC', 'AAPL']
+        all_syms = list(dict.fromkeys(syms + base_syms))[:25]  # dedupe, max 25
+        if all_syms:
+            sym_str = ','.join(all_syms)
+            url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={sym_str}&region=US&lang=en-US"
+            feeds.append((url, "yahoo"))
+        return feeds
 
     def _generate_id(self, headline: str, source: str) -> str:
         """Generate unique ID for news item"""
@@ -105,42 +160,60 @@ class NewsClient:
         return hashlib.md5(content.encode()).hexdigest()[:12]
 
     def _extract_symbols(self, text: str) -> List[str]:
-        """Extract stock symbols from text"""
-        # Look for $SYMBOL pattern
+        """Extract stock symbols from text using multiple strategies."""
+        symbols = set()
+
+        # Strategy 1: $SYMBOL pattern (most reliable)
         dollar_symbols = re.findall(r'\$([A-Z]{1,5})\b', text)
+        symbols.update(dollar_symbols)
 
-        # Look for (NASDAQ: SYMBOL) or (NYSE: SYMBOL) patterns
-        exchange_symbols = re.findall(r'\((?:NASDAQ|NYSE|AMEX):\s*([A-Z]{1,5})\)', text, re.IGNORECASE)
+        # Strategy 2: (NASDAQ: SYMBOL) or (NYSE: SYMBOL) patterns
+        exchange_symbols = re.findall(
+            r'\((?:NASDAQ|NYSE|AMEX|OTC):\s*([A-Z]{1,5})\)', text, re.IGNORECASE
+        )
+        symbols.update(s.upper() for s in exchange_symbols)
 
-        # Combine and dedupe
-        symbols = list(set(dollar_symbols + exchange_symbols))
-        return symbols[:5]  # Max 5 symbols per news
+        # Strategy 3: "SYMBOL stock" or "shares of SYMBOL" patterns
+        stock_refs = re.findall(r'\b([A-Z]{2,5})\s+(?:stock|shares|Inc\.|Corp\.)', text)
+        for s in stock_refs:
+            if s in KNOWN_TICKERS or s in self._universe_symbols:
+                symbols.update([s])
 
-    def _detect_catalyst(self, headline: str) -> tuple[str, str]:
-        """
-        Detect catalyst type and urgency from headline.
-        Returns (catalyst_type, urgency)
-        """
+        # Strategy 4: Match known tickers as standalone words
+        words = set(re.findall(r'\b([A-Z]{2,5})\b', text))
+        for w in words:
+            if w in KNOWN_TICKERS or w in self._universe_symbols:
+                symbols.add(w)
+
+        # Filter out common false positives
+        false_positives = {
+            'CEO', 'CFO', 'COO', 'CTO', 'IPO', 'SEC', 'FDA', 'ETF', 'NYSE',
+            'NASDAQ', 'AMEX', 'OTC', 'EPS', 'GDP', 'CPI', 'PMI', 'USA', 'USD',
+            'THE', 'FOR', 'AND', 'NOT', 'ALL', 'NEW', 'TOP', 'BIG', 'LOW',
+            'HIGH', 'INC', 'LLC', 'LTD', 'CORP', 'EST', 'PST', 'EDG',
+        }
+        symbols -= false_positives
+
+        return list(symbols)[:5]  # Max 5 symbols per news
+
+    def _detect_catalyst(self, headline: str) -> tuple:
+        """Detect catalyst type and urgency from headline."""
         headline_lower = headline.lower()
 
         for catalyst, keywords in CRITICAL_CATALYSTS.items():
             for keyword in keywords:
                 if keyword in headline_lower:
-                    # FDA and merger are critical
                     if catalyst in ['fda', 'merger', 'clinical']:
                         return catalyst, 'critical'
-                    elif catalyst in ['earnings_beat', 'earnings_miss', 'contract']:
+                    elif catalyst in ['earnings_beat', 'earnings_miss', 'contract', 'halt']:
                         return catalyst, 'high'
                     else:
                         return catalyst, 'medium'
 
         return 'general', 'low'
 
-    def _analyze_sentiment(self, headline: str) -> tuple[str, float]:
-        """
-        Analyze sentiment from headline.
-        Returns (sentiment, confidence)
-        """
+    def _analyze_sentiment(self, headline: str) -> tuple:
+        """Analyze sentiment from headline. Returns (sentiment, confidence)."""
         headline_lower = headline.lower()
 
         bullish_count = sum(1 for kw in BULLISH_KEYWORDS if kw in headline_lower)
@@ -159,25 +232,32 @@ class NewsClient:
         """Fetch news from a single RSS feed"""
         try:
             headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                'User-Agent': 'Max_AI/1.0 Scanner (compatible; +https://github.com)'
             }
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, timeout=15, headers=headers) as resp:
+            # SEC EDGAR requires a proper User-Agent with contact
+            if 'sec.gov' in url:
+                headers['User-Agent'] = 'Max_AI/1.0 scanner@example.com'
+
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url, headers=headers) as resp:
                     if resp.status == 200:
                         content = await resp.text()
                         feed = feedparser.parse(content)
-                        entries = feed.entries[:15]  # Latest 15 per feed
-                        # Tag entries with source
+                        entries = feed.entries[:20]
                         for entry in entries:
                             entry['_source'] = source
                         return entries
+                    else:
+                        logger.debug(f"[NEWS] {source} returned {resp.status}")
         except Exception as e:
-            logger.debug(f"{source} RSS fetch failed: {e}")
+            logger.debug(f"[NEWS] {source} fetch failed: {e}")
         return []
 
     async def _fetch_all_feeds(self) -> List[Dict]:
         """Fetch from all RSS feeds in parallel"""
-        tasks = [self._fetch_rss_feed(url, source) for url, source in self.RSS_FEEDS]
+        all_feeds = self.STATIC_FEEDS + self._build_dynamic_feeds()
+        tasks = [self._fetch_rss_feed(url, source) for url, source in all_feeds]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         all_entries = []
@@ -199,8 +279,9 @@ class NewsClient:
             if news_id in self.seen_ids:
                 return None
 
-            # Extract symbols
-            symbols = self._extract_symbols(headline + ' ' + entry.get('summary', ''))
+            # Extract symbols from headline + summary
+            summary = entry.get('summary', '')
+            symbols = self._extract_symbols(headline + ' ' + summary)
             if not symbols:
                 return None  # Skip news without symbols
 
@@ -209,6 +290,12 @@ class NewsClient:
 
             # Analyze sentiment
             sentiment, confidence = self._analyze_sentiment(headline)
+
+            # Boost confidence for critical/high urgency catalysts
+            if urgency == 'critical':
+                confidence = max(confidence, 0.80)
+            elif urgency == 'high':
+                confidence = max(confidence, 0.65)
 
             # Parse published time
             published_at = None
@@ -219,8 +306,11 @@ class NewsClient:
             self.seen_ids.add(news_id)
 
             # Keep seen_ids from growing too large
-            if len(self.seen_ids) > 1000:
-                self.seen_ids = set(list(self.seen_ids)[-500:])
+            if len(self.seen_ids) > 2000:
+                self.seen_ids = set(list(self.seen_ids)[-1000:])
+
+            # Track feed stats
+            self._feed_stats[source] = self._feed_stats.get(source, 0) + 1
 
             return NewsAlert(
                 id=news_id,
@@ -235,19 +325,15 @@ class NewsClient:
                 confidence=confidence
             )
         except Exception as e:
-            logger.error(f"Error processing entry: {e}")
+            logger.error(f"[NEWS] Error processing entry: {e}")
             return None
 
     async def poll_news(self) -> List[NewsAlert]:
         """Poll all RSS feeds and return new alerts"""
         new_alerts = []
 
-        # Fetch from all sources in parallel
         all_entries = await self._fetch_all_feeds()
 
-        logger.info(f"Fetched {len(all_entries)} RSS entries from all feeds")
-
-        # Process all entries
         for entry in all_entries:
             source = entry.get('_source', 'unknown')
             alert = self._process_entry(entry, source)
@@ -257,6 +343,14 @@ class NewsClient:
         # Store recent alerts
         self.recent_alerts = (new_alerts + self.recent_alerts)[:self.max_recent]
 
+        self._poll_count += 1
+
+        if new_alerts:
+            logger.info(
+                f"[NEWS] Poll #{self._poll_count}: {len(all_entries)} entries, "
+                f"{len(new_alerts)} new alerts"
+            )
+
         return new_alerts
 
     def _emit_news_advisories(self, alerts: List[NewsAlert]):
@@ -265,7 +359,7 @@ class NewsClient:
             from scanner_service.advisory_buffer import get_advisory_buffer
             buf = get_advisory_buffer()
 
-            actionable = [a for a in alerts if a.urgency in ['critical', 'high']]
+            actionable = [a for a in alerts if a.urgency in ['critical', 'high', 'medium']]
             for alert in actionable:
                 for symbol in alert.symbols:
                     buf.emit(
@@ -275,28 +369,33 @@ class NewsClient:
                         reason=f"{alert.catalyst_type}: {alert.headline[:80]}",
                         profile="news",
                     )
-                    logger.info(f"[ADVISORY] News advisory: {symbol} ({alert.catalyst_type})")
+                    logger.info(
+                        f"[NEWS] Advisory: {symbol} | {alert.urgency} | "
+                        f"{alert.catalyst_type} | {alert.source}"
+                    )
         except Exception as e:
-            logger.error(f"Error emitting news advisories: {e}")
+            logger.error(f"[NEWS] Error emitting advisories: {e}")
 
     async def _poll_loop(self):
         """Main polling loop"""
-        logger.info(f"News client started (poll interval: {self._poll_interval}s)")
+        logger.info(
+            f"[NEWS] Client started | interval={self._poll_interval}s | "
+            f"feeds={len(self.STATIC_FEEDS)}+dynamic"
+        )
 
         while self._running:
             try:
                 alerts = await self.poll_news()
                 if alerts:
-                    logger.info(f"Found {len(alerts)} new news alerts")
                     self._emit_news_advisories(alerts)
             except Exception as e:
-                logger.error(f"Poll loop error: {e}")
+                logger.error(f"[NEWS] Poll loop error: {e}")
 
             await asyncio.sleep(self._poll_interval)
 
-        logger.info("News client stopped")
+        logger.info("[NEWS] Client stopped")
 
-    def start(self, poll_interval: int = 10):
+    def start(self, poll_interval: int = 30):
         """Start the news polling service"""
         if self._running:
             return
@@ -318,8 +417,11 @@ class NewsClient:
         return {
             "running": self._running,
             "poll_interval": self._poll_interval,
+            "poll_count": self._poll_count,
             "seen_count": len(self.seen_ids),
             "recent_alerts": len(self.recent_alerts),
+            "feed_stats": self._feed_stats,
+            "universe_symbols_tracked": len(self._universe_symbols),
         }
 
 

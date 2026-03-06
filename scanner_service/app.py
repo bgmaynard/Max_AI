@@ -35,6 +35,9 @@ from scanner_service.alerts.router import AlertRouter
 from scanner_service.storage.state import ScannerState, ScannerStatus
 from scanner_service.storage.cache import QuoteCache
 from scanner_service.advisory_buffer import get_advisory_buffer, AdvisoryBuffer, NegativeAdvisory
+from scanner_service.watchlist.stock_classifier import StockClassifier
+from scanner_service.watchlist.daily_tracker import DailyTracker
+from scanner_service.watchlist.vetted_list import VettedWatchlist
 
 # Configure logging
 logging.basicConfig(
@@ -57,6 +60,11 @@ quote_cache: Optional[QuoteCache] = None
 
 # Advisory buffer
 advisory_buffer: Optional[AdvisoryBuffer] = None
+
+# Watchlist system (Warrior Trading + SMB Capital framework)
+stock_classifier: Optional[StockClassifier] = None
+daily_tracker: Optional[DailyTracker] = None
+vetted_watchlist: Optional[VettedWatchlist] = None
 
 # Phase-aware advisory thresholds
 # Pre-market: accumulate aggressively, low bar, long TTL
@@ -171,6 +179,7 @@ async def lifespan(app: FastAPI):
     global schwab_client, universe, feature_engine, profile_loader
     global scorer, ranker, alert_router, scanner_state, quote_cache, scanner_task
     global token_refresh_task, advisory_buffer
+    global stock_classifier, daily_tracker, vetted_watchlist
 
     logger.info("Starting Max Scanner Service...")
 
@@ -185,6 +194,9 @@ async def lifespan(app: FastAPI):
     scanner_state = ScannerState()
     quote_cache = QuoteCache(ttl_seconds=1.5)  # Short TTL to allow velocity calculation
     advisory_buffer = get_advisory_buffer(ttl_seconds=ADVISORY_TTL_SECONDS)
+    stock_classifier = StockClassifier()
+    daily_tracker = DailyTracker()
+    vetted_watchlist = VettedWatchlist(max_stocks=10)
     phase = get_market_phase()
     phase_cfg = PHASE_CONFIG.get(phase, PHASE_CONFIG["OPEN"])
     logger.info(
@@ -202,6 +214,15 @@ async def lifespan(app: FastAPI):
     logger.info("[TOKEN_RELOAD] Shared token reload daemon started (Morpheus is the token owner)")
 
     logger.info(f"Scanner service started on {settings.scanner_host}:{settings.scanner_port}")
+
+    # Auto-start news RSS polling
+    try:
+        from scanner_service.ingest.news_client import get_news_client
+        nc = get_news_client()
+        nc.start(poll_interval=30)
+        logger.info("[NEWS] Auto-started news RSS polling (30s interval)")
+    except Exception as e:
+        logger.warning(f"[NEWS] Failed to auto-start news client: {e}")
 
     yield
 
@@ -315,6 +336,18 @@ async def _fetch_tradingview_gappers():
             universe.add_symbols(new_symbols)
             logger.info(f"[TV] Added {len(new_symbols)} new symbols to universe: {new_symbols}")
 
+        # Register TV discoveries with daily tracker
+        if daily_tracker:
+            for g in gappers:
+                sym = g["symbol"]
+                if sym in new_symbols:
+                    daily_tracker.register(
+                        symbol=sym,
+                        price=g.get("price", 0),
+                        source="tradingview_premarket",
+                        change_pct=g.get("change_pct", 0),
+                    )
+
         # Emit advisories for all gappers (already filtered >=5% by TV query)
         # Confidence: 0.55 base + change bonus. These are real pre-market movers
         # with confirmed volume — they should clear the 0.50 poller threshold.
@@ -385,6 +418,18 @@ async def _fetch_webull_premarket_gainers():
         if new_symbols and universe:
             universe.add_symbols(new_symbols)
             logger.info(f"[WEBULL] Added {len(new_symbols)} new symbols to universe: {new_symbols}")
+
+        # Register Webull discoveries with daily tracker
+        if daily_tracker:
+            for g in gainers:
+                sym = g["symbol"]
+                if sym in new_symbols:
+                    daily_tracker.register(
+                        symbol=sym,
+                        price=g.get("price", 0),
+                        source="webull_premarket",
+                        change_pct=g.get("change_pct", 0),
+                    )
 
         if advisory_buffer:
             phase_cfg = PHASE_CONFIG.get("PREMARKET", PHASE_CONFIG["OPEN"])
@@ -604,6 +649,14 @@ async def run_scan_cycle():
     # Intraday small-cap movers (TV + Finviz, every 5 min during OPEN)
     await _fetch_intraday_smallcap_movers()
 
+    # Feed universe symbols to news client for dynamic Yahoo RSS
+    try:
+        nc = _get_news_client()
+        if nc and universe:
+            nc.set_universe_symbols(set(universe.candidates))
+    except Exception:
+        pass
+
     # Get symbols to scan
     symbols = universe.candidates
 
@@ -735,6 +788,121 @@ async def run_scan_cycle():
         if negative_count > 0:
             logger.info(f"[ADVISORY][NEGATIVE] Emitted {negative_count} DO_NOT_TRADE signals")
 
+    # ── Watchlist system: classify + track + vet ──────────────────────
+    if stock_classifier and daily_tracker and vetted_watchlist:
+        phase = get_market_phase()
+
+        # Determine market phase for classifier time-of-day adjustment
+        try:
+            import pytz
+            from datetime import time as dt_time
+            et = pytz.timezone("US/Eastern")
+            now_et = datetime.now(et)
+            t = now_et.time()
+            if dt_time(4, 0) <= t < dt_time(9, 30):
+                cls_phase = "PREMARKET"
+            elif dt_time(9, 30) <= t < dt_time(10, 30):
+                cls_phase = "FIRST_HOUR"
+            elif dt_time(10, 30) <= t < dt_time(11, 30):
+                cls_phase = "SECOND_HOUR"
+            elif dt_time(11, 30) <= t < dt_time(15, 0):
+                cls_phase = "MIDDAY"
+            else:
+                cls_phase = "POWER_HOUR"
+        except Exception:
+            cls_phase = "OPEN"
+
+        # Set session start on first OPEN-phase scan
+        if phase == "OPEN" and not vetted_watchlist._session_start:
+            vetted_watchlist.set_session_start()
+
+        # Feed news catalysts to classifier
+        try:
+            nc = _get_news_client()
+            if nc.recent_alerts:
+                stock_classifier.update_catalysts(nc.recent_alerts)
+        except Exception:
+            pass
+
+        # Collect all unique rows across profiles for classification
+        all_rows = {}
+        for profile_name, output in outputs.items():
+            for row in output.rows:
+                sym = row.symbol
+                if sym not in all_rows or row.ai_score > all_rows[sym].ai_score:
+                    all_rows[sym] = row
+
+        if all_rows:
+            # Classify all symbols
+            classifications = {}
+            for sym, row in all_rows.items():
+                sym_features = features.get(sym, {})
+                cls = stock_classifier.classify(
+                    symbol=sym,
+                    price=row.last_price,
+                    change_pct=row.change_pct,
+                    gap_pct=sym_features.get("gap_pct", 0),
+                    rvol=row.rvol,
+                    volume=row.volume,
+                    spread_pct=sym_features.get("spread", row.spread if hasattr(row, "spread") else 0),
+                    float_m=row.float_shares if hasattr(row, "float_shares") else 0,
+                    ai_score=row.ai_score,
+                    hod_proximity=sym_features.get("hod_proximity", 0),
+                    velocity=sym_features.get("velocity", 0),
+                    market_phase=cls_phase,
+                )
+                classifications[sym] = cls
+
+                # Register with tracker if new
+                daily_tracker.register(
+                    symbol=sym,
+                    price=row.last_price,
+                    source=cls.catalyst or "scanner_cycle",
+                    tier=cls.tier,
+                    catalyst=cls.catalyst,
+                    change_pct=row.change_pct,
+                )
+                # Update tracker
+                daily_tracker.update(
+                    symbol=sym,
+                    price=row.last_price,
+                    change_pct=row.change_pct,
+                    rvol=row.rvol,
+                    volume=row.volume,
+                    tier=cls.tier,
+                )
+
+                # Auto-add A-class to vetted list
+                if cls.tier == "A":
+                    vetted_watchlist.try_add(
+                        symbol=sym,
+                        tier="A",
+                        score=cls.score,
+                        price=row.last_price,
+                        change_pct=row.change_pct,
+                        rvol=row.rvol,
+                        volume=row.volume,
+                        float_m=row.float_shares if hasattr(row, "float_shares") else 0,
+                        source=cls.catalyst or "scanner",
+                        catalyst=cls.catalyst,
+                    )
+
+            # Update vetted list prices
+            price_map = {sym: row.last_price for sym, row in all_rows.items()}
+            vetted_watchlist.update_prices(price_map)
+
+            # Check for removals
+            vetted_watchlist.check_removals(classifications)
+
+            # Log tier counts periodically (every ~60 scans)
+            stats = stock_classifier.get_stats()
+            if stats["current_total"] > 0 and stats["current_total"] % 10 == 0:
+                logger.info(
+                    f"[WATCHLIST] A={stats['current_a']} B={stats['current_b']} "
+                    f"C={stats['current_c']} | vetted={len(vetted_watchlist.get_symbols())} "
+                    f"| promotions={stats['promotions']} demotions={stats['demotions']}"
+                )
+
 
 async def push_advisory(advisory_data: dict) -> None:
     """Push advisory to all connected WebSocket consumers (Morpheus, IBKR_V2)."""
@@ -847,7 +1015,7 @@ async def health():
         from scanner_service.ingest.news_client import get_news_client
         nc = get_news_client()
         ns = nc.get_status()
-        rss_ok = ns.get("running", False) or ns.get("poll_count", 0) > 0
+        rss_ok = ns.get("running", False) and ns.get("poll_count", 0) > 0
     except Exception:
         pass
 
@@ -1232,6 +1400,102 @@ async def auth_refresh():
         return {"status": "refreshed", "authenticated": True}
     else:
         raise HTTPException(status_code=400, detail="Token refresh failed")
+
+
+# ============== Watchlist System (A/B/C Classification) ==============
+
+
+@app.get("/watchlist")
+async def get_vetted_watchlist():
+    """Get the curated vetted watchlist (top 5-10 tradeable stocks)."""
+    if not vetted_watchlist:
+        return {"list": [], "stats": {}}
+    return {
+        "list": vetted_watchlist.get_list(),
+        "symbols": vetted_watchlist.get_symbols(),
+        "stats": vetted_watchlist.get_stats(),
+    }
+
+
+@app.get("/watchlist/classifications")
+async def get_classifications():
+    """Get all current A/B/C stock classifications."""
+    if not stock_classifier:
+        return {"A": [], "B": [], "C": []}
+    return stock_classifier.get_all_classified()
+
+
+@app.get("/watchlist/classifications/stats")
+async def get_classification_stats():
+    """Get classification statistics."""
+    if not stock_classifier:
+        return {}
+    return stock_classifier.get_stats()
+
+
+@app.get("/watchlist/tracker")
+async def get_daily_tracker():
+    """Get daily performance comparison for all tracked symbols."""
+    if not daily_tracker:
+        return {"total_tracked": 0, "groups": {}}
+    return daily_tracker.get_comparison()
+
+
+@app.get("/watchlist/tracker/profitable")
+async def get_profitable_stocks():
+    """Get all currently profitable stocks from discovery price."""
+    if not daily_tracker:
+        return []
+    return daily_tracker.get_profitable()
+
+
+@app.get("/watchlist/tracker/eod")
+async def get_eod_report():
+    """Get end-of-day performance report."""
+    if not daily_tracker:
+        return {}
+    return daily_tracker.end_of_day_report()
+
+
+class ManualAddRequest(BaseModel):
+    """Request to manually add a stock to vetted list."""
+    symbol: str
+    price: float = 0.0
+    reason: str = "Manual conviction"
+
+
+@app.post("/watchlist/add")
+async def manual_add_to_watchlist(req: ManualAddRequest):
+    """Manually add a stock to the vetted watchlist (B-class promotion)."""
+    if not vetted_watchlist:
+        raise HTTPException(status_code=503, detail="Watchlist not initialized")
+    added, msg = vetted_watchlist.manual_add(
+        symbol=req.symbol, price=req.price, reason=req.reason
+    )
+    return {"added": added, "message": msg}
+
+
+@app.delete("/watchlist/{symbol}")
+async def remove_from_watchlist(symbol: str, reason: str = "Manual removal"):
+    """Remove a stock from the vetted watchlist."""
+    if not vetted_watchlist:
+        raise HTTPException(status_code=503, detail="Watchlist not initialized")
+    removed = vetted_watchlist.remove(symbol, reason=reason)
+    if not removed:
+        raise HTTPException(status_code=404, detail=f"{symbol} not on vetted list")
+    return {"removed": True, "symbol": symbol.upper()}
+
+
+@app.post("/watchlist/reset")
+async def reset_watchlist():
+    """Reset all watchlist components for a new trading day."""
+    if stock_classifier:
+        stock_classifier.clear()
+    if daily_tracker:
+        daily_tracker.clear()
+    if vetted_watchlist:
+        vetted_watchlist.clear()
+    return {"status": "reset", "message": "Classifier, tracker, and vetted list cleared"}
 
 
 # ============== Admin ==============
