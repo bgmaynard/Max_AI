@@ -3,7 +3,7 @@ Research Server Client
 ========================
 Connects to Morpheus Research Server for sector intelligence.
 
-Base URL: http://localhost:8000 (configurable)
+Base URL: http://RESEARCH1:9200 (configurable via env RESEARCH_SERVER)
 
 Endpoints:
   GET /api/sector/heatmap     — sector heat scores
@@ -23,7 +23,8 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Defaults
-DEFAULT_BASE_URL = "http://localhost:8000"
+import os
+DEFAULT_BASE_URL = os.getenv("RESEARCH_SERVER", "http://RESEARCH1:9200")
 HEATMAP_CACHE_TTL = 60  # seconds
 REQUEST_TIMEOUT = 5.0  # seconds — don't slow the scan loop
 
