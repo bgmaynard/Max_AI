@@ -54,6 +54,10 @@ class ScannerRow(BaseModel):
     ai_score: float = Field(ge=0, le=1)
     profile: str
     alerts: list[str] = Field(default_factory=list, description="Active alert types")
+    sector: str = Field(default="unknown", description="Sector classification from research server")
+    heat: str = Field(default="COLD", description="Sector heat label: HOT/WARM/COOL/COLD")
+    heat_score: float = Field(default=0.0, description="Raw sector heat score 0-1")
+    cluster_role: str = Field(default="none", description="Momentum chain role: leader/sympathy/none")
     timestamp: datetime = Field(default_factory=datetime.utcnow)
 
 

@@ -39,7 +39,9 @@ from scanner_service.watchlist.stock_classifier import StockClassifier
 from scanner_service.watchlist.daily_tracker import DailyTracker
 from scanner_service.watchlist.vetted_list import VettedWatchlist
 from scanner_service.ingest.news_pipeline import get_news_pipeline, NewsPipeline
-from scanner_service.strategy.ignition_scorer import IgnitionScorer
+from scanner_service.ingest.research_client import get_research_client, ResearchClient
+from scanner_service.strategy.ignition_scorer import IgnitionScorer, heat_label
+from scanner_service.strategy.momentum_chain_detector import MomentumChainDetector, sector_multiplier
 from scanner_service.health_monitor import get_health_monitor, HealthMonitor
 
 # Configure logging
@@ -69,10 +71,12 @@ stock_classifier: Optional[StockClassifier] = None
 daily_tracker: Optional[DailyTracker] = None
 vetted_watchlist: Optional[VettedWatchlist] = None
 
-# Ignition scorer + Health monitor + News pipeline
+# Ignition scorer + Health monitor + News pipeline + Sector intelligence
 ignition_scorer: Optional[IgnitionScorer] = None
 health_monitor: Optional[HealthMonitor] = None
 news_pipeline: Optional[NewsPipeline] = None
+research_client: Optional[ResearchClient] = None
+chain_detector: Optional[MomentumChainDetector] = None
 
 # Phase-aware advisory thresholds
 # Pre-market: accumulate aggressively, low bar, long TTL
@@ -188,7 +192,7 @@ async def lifespan(app: FastAPI):
     global scorer, ranker, alert_router, scanner_state, quote_cache, scanner_task
     global token_refresh_task, advisory_buffer
     global stock_classifier, daily_tracker, vetted_watchlist
-    global ignition_scorer, health_monitor, news_pipeline
+    global ignition_scorer, health_monitor, news_pipeline, research_client, chain_detector
 
     logger.info("Starting Max Scanner Service...")
 
@@ -209,6 +213,8 @@ async def lifespan(app: FastAPI):
     ignition_scorer = IgnitionScorer()
     health_monitor = get_health_monitor()
     news_pipeline = get_news_pipeline()
+    research_client = get_research_client()
+    chain_detector = MomentumChainDetector()
     phase = get_market_phase()
     phase_cfg = PHASE_CONFIG.get(phase, PHASE_CONFIG["OPEN"])
     logger.info(
@@ -920,7 +926,10 @@ async def run_scan_cycle():
                     f"| promotions={stats['promotions']} demotions={stats['demotions']}"
                 )
 
-    # ── Ignition scoring: rank by probability of ignition ────────────
+    # ── Sector intelligence + Ignition scoring + Chain detection ────
+    _sector_map: dict[str, str] = {}
+    _heat_scores: dict[str, float] = {}
+
     if ignition_scorer and outputs:
         # Feed catalyst data from news pipeline
         try:
@@ -931,7 +940,7 @@ async def run_scan_cycle():
         except Exception:
             pass
 
-        # Collect all unique rows for ignition scoring
+        # Collect all unique rows for scoring
         all_rows_for_ignition = {}
         for profile_name, output in outputs.items():
             for row in output.rows:
@@ -940,14 +949,68 @@ async def run_scan_cycle():
                     all_rows_for_ignition[sym] = row
 
         if all_rows_for_ignition:
+            # Fetch sector classifications + heatmap from research server
+            try:
+                if research_client:
+                    symbols_to_classify = list(all_rows_for_ignition.keys())
+                    sector_data = await research_client.get_symbol_sectors_batch(symbols_to_classify)
+                    _sector_map = {sym: d.get("sector", "unknown") for sym, d in sector_data.items()}
+
+                    heatmap = await research_client.get_heatmap()
+                    _heat_scores = {
+                        sector: data.get("heat_score", 0.30)
+                        for sector, data in heatmap.items()
+                    } if heatmap else {}
+            except Exception as e:
+                logger.debug(f"[RESEARCH] Sector fetch failed (using defaults): {e}")
+
+            # Momentum chain detection
+            if chain_detector and _sector_map:
+                chain_candidates = []
+                for sym, row in all_rows_for_ignition.items():
+                    feat = features.get(sym, {})
+                    chain_candidates.append({
+                        "symbol": sym,
+                        "change_pct": row.change_pct,
+                        "rvol": feat.get("rvol", row.rvol if hasattr(row, "rvol") else 0),
+                        "price": row.last_price,
+                        "volume": row.volume,
+                    })
+                chain_detector.detect(chain_candidates, _sector_map)
+
+            # Ignition scoring with sector + chain multipliers
             ignition_ranked = ignition_scorer.rank_symbols(
                 rows=list(all_rows_for_ignition.values()),
                 features=features,
                 quotes=snapshot.quotes,
                 limit=20,
+                sector_map=_sector_map,
+                heat_scores=_heat_scores,
+                chain_detector=chain_detector,
             )
-            # Store for API access
             scanner_state._ignition_ranked = ignition_ranked
+
+            # Enrich ScannerRow objects with sector/heat/cluster_role
+            for profile_name, output in outputs.items():
+                for row in output.rows:
+                    sym = row.symbol
+                    sector = _sector_map.get(sym, "unknown")
+                    s_heat = _heat_scores.get(sector, 0.30)
+                    row.sector = sector
+                    row.heat_score = round(s_heat, 2)
+                    row.heat = heat_label(s_heat)
+                    row.cluster_role = chain_detector.get_role(sym) if chain_detector else "none"
+
+            # Log sector heat application
+            hot_sectors = [s for s, h in _heat_scores.items() if h >= 0.70]
+            if hot_sectors:
+                logger.info(f"[SECTOR] Hot sectors applied: {', '.join(hot_sectors)}")
+
+            # Log chain detections
+            if chain_detector:
+                chains = chain_detector.get_chains()
+                if chains:
+                    scanner_state._momentum_chains = chains
 
     # ── Premarket focus mode: prioritized list for Morpheus ──────────
     phase = get_market_phase()
@@ -2208,6 +2271,68 @@ async def news_pipeline_status():
     if not news_pipeline:
         return {"error": "Pipeline not initialized"}
     return news_pipeline.get_status()
+
+
+# ============== Sector Intelligence ==============
+
+
+@app.get("/sector/heatmap")
+async def get_sector_heatmap():
+    """Get sector heat scores from research server (cached 60s)."""
+    if not research_client:
+        return {"heatmap": {}, "available": False}
+    heatmap = await research_client.get_heatmap()
+    return {
+        "heatmap": {
+            sector: {
+                **data,
+                "heat": heat_label(data.get("heat_score", 0)),
+                "multiplier": round(sector_multiplier(data.get("heat_score", 0)), 2),
+            }
+            for sector, data in heatmap.items()
+        },
+        "available": research_client._available,
+    }
+
+
+@app.get("/sector/symbol/{symbol}")
+async def get_symbol_sector(symbol: str):
+    """Get sector classification for a symbol."""
+    if not research_client:
+        return {"symbol": symbol.upper(), "sector": "unknown"}
+    data = await research_client.get_symbol_sector(symbol)
+    sector = data.get("sector", "unknown")
+    heat = research_client.get_heat_score(sector)
+    return {
+        **data,
+        "heat_score": round(heat, 2),
+        "heat": heat_label(heat),
+        "multiplier": round(sector_multiplier(heat), 2),
+    }
+
+
+@app.get("/sector/status")
+async def sector_status():
+    """Get research server connection status."""
+    if not research_client:
+        return {"error": "Research client not initialized"}
+    return research_client.get_status()
+
+
+# ============== Momentum Chains ==============
+
+
+@app.get("/chains")
+async def get_momentum_chains():
+    """Get detected momentum chains (sector clusters with leader + sympathy)."""
+    chains = getattr(scanner_state, "_momentum_chains", []) if scanner_state else []
+    chain_symbols = chain_detector.get_chain_symbols() if chain_detector else {}
+    return {
+        "chains": chains,
+        "chain_count": len(chains),
+        "chain_symbols": chain_symbols,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
 
 
 # ============== Health Monitor ==============

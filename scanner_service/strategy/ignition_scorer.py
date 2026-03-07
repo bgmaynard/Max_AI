@@ -4,16 +4,34 @@ Ignition Scorer — Composite Ranking for Highest Probability of Ignition
 Replaces simple filtering with a multi-factor composite score.
 
 Score = relative_volume * float_score * catalyst_score * price_range_expansion * liquidity_score
+      * sector_multiplier(heat) * chain_multiplier
 
 Each factor is normalized to [0, 1] and the product creates a multiplicative
 gate — a zero in any factor kills the score entirely.
+
+Sector heat and chain membership are applied as post-multipliers.
 """
 
 import logging
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 
+from scanner_service.strategy.momentum_chain_detector import (
+    MomentumChainDetector, sector_multiplier,
+)
+
 logger = logging.getLogger(__name__)
+
+
+def heat_label(heat_score: float) -> str:
+    """Convert numeric heat score to display label."""
+    if heat_score >= 0.70:
+        return "HOT"
+    if heat_score >= 0.50:
+        return "WARM"
+    if heat_score >= 0.30:
+        return "COOL"
+    return "COLD"
 
 
 class IgnitionScorer:
@@ -26,6 +44,8 @@ class IgnitionScorer:
       3. catalyst_score   — news/catalyst presence boosts score
       4. price_range_expansion — intraday range vs avg range
       5. liquidity_score  — bid/ask spread health (too wide = bad)
+      6. sector_heat      — hot sector multiplier (from research server)
+      7. chain_membership — momentum chain multiplier (leader/sympathy boost)
     """
 
     def __init__(self):
@@ -61,6 +81,10 @@ class IgnitionScorer:
         prev_close: float,
         volume: int,
         avg_volume: int,
+        sector_heat: float = 0.30,
+        chain_mult: float = 1.0,
+        sector: str = "unknown",
+        cluster_role: str = "none",
     ) -> dict:
         """
         Compute ignition score for a single symbol.
@@ -68,11 +92,9 @@ class IgnitionScorer:
         Returns dict with total score and component breakdown.
         """
         # 1. Relative Volume Score (0-1)
-        # rvol 1x = 0.2, 3x = 0.6, 5x+ = 1.0
         rv_score = min(1.0, rvol / 5.0) if rvol > 0 else 0.0
 
         # 2. Float Score (0-1) — lower float = higher score
-        # <10M = 1.0, 10-20M = 0.8, 20-50M = 0.6, 50-100M = 0.3, >100M = 0.1
         if float_millions <= 0:
             fl_score = 0.5  # Unknown float — neutral
         elif float_millions < 10:
@@ -87,25 +109,21 @@ class IgnitionScorer:
             fl_score = 0.1
 
         # 3. Catalyst Score (0-1)
-        # Known catalyst = confidence from news, no catalyst = 0.3 baseline
         cat_confidence = self._catalyst_symbols.get(symbol, 0)
         cat_type = self._catalyst_types.get(symbol, "none")
         if cat_confidence > 0:
-            cat_score = max(0.5, cat_confidence)  # At least 0.5 if any catalyst
+            cat_score = max(0.5, cat_confidence)
         else:
-            cat_score = 0.3  # No catalyst — still tradeable but lower priority
+            cat_score = 0.3
 
         # 4. Price Range Expansion (0-1)
-        # How much of today's range has expanded vs previous close
         if prev_close > 0 and high > low:
             intraday_range_pct = ((high - low) / prev_close) * 100
-            # 2% range = 0.3, 5% = 0.6, 10%+ = 1.0
             pre_score = min(1.0, intraday_range_pct / 10.0)
         else:
-            pre_score = 0.3  # Neutral if no data
+            pre_score = 0.3
 
-        # 5. Liquidity Score (0-1) — tighter spread = better
-        # <0.2% = 1.0, 0.5% = 0.7, 1% = 0.4, >2% = 0.1
+        # 5. Liquidity Score (0-1)
         if spread_pct <= 0.1:
             liq_score = 1.0
         elif spread_pct <= 0.3:
@@ -119,8 +137,17 @@ class IgnitionScorer:
         else:
             liq_score = 0.1
 
-        # Composite (multiplicative)
-        total = rv_score * fl_score * cat_score * pre_score * liq_score
+        # Base composite (multiplicative)
+        base_score = rv_score * fl_score * cat_score * pre_score * liq_score
+
+        # 6. Sector heat multiplier
+        sec_mult = sector_multiplier(sector_heat)
+
+        # 7. Chain multiplier (already computed externally)
+        # chain_mult passed in
+
+        # Final score
+        total = base_score * sec_mult * chain_mult
 
         return {
             "symbol": symbol,
@@ -131,6 +158,8 @@ class IgnitionScorer:
                 "catalyst_score": round(cat_score, 3),
                 "price_range_expansion": round(pre_score, 3),
                 "liquidity_score": round(liq_score, 3),
+                "sector_multiplier": round(sec_mult, 2),
+                "chain_multiplier": round(chain_mult, 2),
             },
             "meta": {
                 "rvol": round(rvol, 2),
@@ -139,6 +168,10 @@ class IgnitionScorer:
                 "change_pct": round(change_pct, 2),
                 "catalyst_type": cat_type,
                 "volume": volume,
+                "sector": sector,
+                "heat_score": round(sector_heat, 2),
+                "heat": heat_label(sector_heat),
+                "cluster_role": cluster_role,
             },
         }
 
@@ -148,6 +181,9 @@ class IgnitionScorer:
         features: Dict[str, dict],
         quotes: dict,
         limit: int = 20,
+        sector_map: Optional[Dict[str, str]] = None,
+        heat_scores: Optional[Dict[str, float]] = None,
+        chain_detector: Optional[MomentumChainDetector] = None,
     ) -> List[dict]:
         """
         Score and rank all symbols by ignition probability.
@@ -157,10 +193,16 @@ class IgnitionScorer:
             features: Feature dict keyed by symbol
             quotes: Quote objects keyed by symbol
             limit: Max symbols to return
+            sector_map: {symbol: sector_name} from research server
+            heat_scores: {sector: heat_score} from research heatmap
+            chain_detector: MomentumChainDetector with detected chains
 
         Returns:
             List of scored symbols sorted by ignition_score descending
         """
+        sector_map = sector_map or {}
+        heat_scores = heat_scores or {}
+
         scored = []
         for row in rows:
             sym = row.symbol
@@ -168,6 +210,12 @@ class IgnitionScorer:
             feat = features.get(sym, {})
             if not quote:
                 continue
+
+            # Sector intelligence
+            sector = sector_map.get(sym, "unknown")
+            s_heat = heat_scores.get(sector, 0.30)
+            chain_mult = chain_detector.get_multiplier(sym) if chain_detector else 1.0
+            cluster_role = chain_detector.get_role(sym) if chain_detector else "none"
 
             result = self.score_symbol(
                 symbol=sym,
@@ -180,6 +228,10 @@ class IgnitionScorer:
                 prev_close=quote.prev_close if hasattr(quote, "prev_close") else 0,
                 volume=row.volume,
                 avg_volume=quote.avg_volume if quote.avg_volume else 0,
+                sector_heat=s_heat,
+                chain_mult=chain_mult,
+                sector=sector,
+                cluster_role=cluster_role,
             )
             scored.append(result)
 
