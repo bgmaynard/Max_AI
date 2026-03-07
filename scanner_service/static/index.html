@@ -406,6 +406,123 @@
         .cell-score.medium { background: rgba(210, 153, 34, 0.25); color: var(--accent-yellow); }
         .cell-score.low { background: rgba(139, 148, 158, 0.15); color: var(--text-secondary); }
 
+        /* Sector Heat Indicators */
+        .heat-dot {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 4px;
+            vertical-align: middle;
+        }
+        .heat-dot.hot { background: #da3633; box-shadow: 0 0 4px rgba(218,54,51,0.5); }
+        .heat-dot.warm { background: #d29922; box-shadow: 0 0 4px rgba(210,153,34,0.4); }
+        .heat-dot.cool { background: #58a6ff; }
+        .heat-dot.cold { background: #484f58; }
+
+        .cell-heat {
+            font-size: 10px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .cell-heat.hot { color: var(--accent-red); }
+        .cell-heat.warm { color: var(--accent-yellow); }
+        .cell-heat.cool { color: var(--accent-blue); }
+        .cell-heat.cold { color: var(--text-secondary); }
+
+        .cell-sector {
+            font-size: 11px;
+            color: var(--text-secondary);
+            max-width: 80px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .cell-role {
+            font-size: 11px;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .cell-role.leader { color: var(--accent-yellow); }
+        .cell-role.sympathy { color: var(--accent-purple); }
+
+        /* Chain grouping - top border on first chain member */
+        tr.chain-start td {
+            border-top: 2px solid var(--accent-purple);
+        }
+        tr.chain-member {
+            background: rgba(163, 113, 247, 0.05);
+        }
+        tr.chain-member:hover {
+            background: rgba(163, 113, 247, 0.12);
+        }
+
+        /* Sector Heatmap Panel */
+        .heatmap-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 8px;
+            padding: 12px;
+        }
+        .heatmap-tile {
+            padding: 10px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+            text-align: center;
+            transition: all 0.2s;
+        }
+        .heatmap-tile:hover {
+            transform: scale(1.03);
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        .heatmap-tile.hot {
+            background: rgba(218, 54, 51, 0.2);
+            border-color: rgba(218, 54, 51, 0.4);
+        }
+        .heatmap-tile.warm {
+            background: rgba(210, 153, 34, 0.2);
+            border-color: rgba(210, 153, 34, 0.4);
+        }
+        .heatmap-tile.cool {
+            background: rgba(88, 166, 255, 0.1);
+            border-color: rgba(88, 166, 255, 0.3);
+        }
+        .heatmap-tile.cold {
+            background: var(--bg-tertiary);
+        }
+        .heatmap-sector-name {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+            text-transform: uppercase;
+        }
+        .heatmap-score {
+            font-size: 18px;
+            font-weight: 700;
+        }
+        .heatmap-score.hot { color: var(--accent-red); }
+        .heatmap-score.warm { color: var(--accent-yellow); }
+        .heatmap-score.cool { color: var(--accent-blue); }
+        .heatmap-score.cold { color: var(--text-secondary); }
+        .heatmap-label {
+            font-size: 10px;
+            font-weight: 600;
+            margin-top: 2px;
+        }
+
+        /* Chain summary banner */
+        .chain-banner {
+            padding: 6px 12px;
+            background: rgba(163, 113, 247, 0.1);
+            border-bottom: 1px solid rgba(163, 113, 247, 0.3);
+            font-size: 11px;
+            color: var(--accent-purple);
+            display: none;
+        }
+        .chain-banner.active { display: block; }
+
         .cell-bar {
             width: 50px;
             height: 4px;
@@ -768,6 +885,7 @@
                             <option value="finviz">Finviz Top Gainers</option>
                             <option value="halts">Trading Halts</option>
                             <option value="news">News Feed</option>
+                            <option value="heatmap">Sector Heatmap</option>
                         </select>
                     </div>
                     <div class="form-group" id="profileGroup">
@@ -869,6 +987,8 @@
                                 <option value="rvol">RVOL</option>
                                 <option value="hod_proximity">HOD %</option>
                                 <option value="velocity">Velocity</option>
+                                <option value="heat_score">Sector Heat</option>
+                                <option value="cluster_role">Chain Role</option>
                             </select>
                         </div>
                     </div>
@@ -1097,6 +1217,16 @@
             profileGroup.style.display = source === 'scanner' ? 'block' : 'none';
         }
 
+        // Get heat class from heat label string
+        function getHeatClass(heat) {
+            if (!heat) return 'cold';
+            const h = heat.toLowerCase();
+            if (h === 'hot') return 'hot';
+            if (h === 'warm') return 'warm';
+            if (h === 'cool') return 'cool';
+            return 'cold';
+        }
+
         // Load saved dashboard from localStorage
         function loadDashboard() {
             const saved = localStorage.getItem('maxai_dashboard');
@@ -1163,10 +1293,49 @@
             const isFinviz = panel.source === 'finviz';
             const isHalts = panel.source === 'halts';
             const isNews = panel.source === 'news';
+            const isHeatmap = panel.source === 'heatmap';
 
             let sourceLabel, sourceBadgeClass, headers;
 
-            if (isNews) {
+            if (isHeatmap) {
+                sourceLabel = 'HEATMAP';
+                sourceBadgeClass = 'panel-profile';
+                // Heatmap uses a grid, not a table — handled below
+                const pos = panel.position || getDefaultPosition(panels.indexOf(panel));
+                const size = panel.size || { width: 500, height: 350 };
+                return `
+                    <div class="panel" data-panel-id="${panel.id}"
+                         style="left: ${pos.x}px; top: ${pos.y}px; width: ${size.width}px; height: ${size.height}px;"
+                         onmousedown="startDrag(event, '${panel.id}')">
+                        <div class="panel-header">
+                            <div class="panel-title">
+                                <span class="panel-name">${panel.name}</span>
+                                <span class="panel-profile" style="color:var(--accent-yellow);background:rgba(210,153,34,0.15);">HEATMAP</span>
+                                <span class="count" id="count-${panel.id}">0</span>
+                            </div>
+                            <div class="panel-actions">
+                                <button class="btn btn-sm btn-icon tooltip" data-tooltip="Refresh" onclick="event.stopPropagation(); loadPanelData('${panel.id}')">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M23 4v6h-6"/><path d="M1 20v-6h6"/>
+                                        <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                                    </svg>
+                                </button>
+                                <button class="btn btn-sm btn-icon tooltip" data-tooltip="Settings" onclick="event.stopPropagation(); showContextMenu(event, '${panel.id}')">
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/><circle cx="5" cy="12" r="1"/>
+                                    </svg>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="panel-content">
+                            <div class="heatmap-grid" id="heatmap-${panel.id}">
+                                <div class="empty-state">Loading heatmap...</div>
+                            </div>
+                        </div>
+                        <div class="resize-handle" onmousedown="startResize(event, '${panel.id}')"></div>
+                    </div>
+                `;
+            } else if (isNews) {
                 sourceLabel = 'NEWS';
                 sourceBadgeClass = 'panel-profile news-badge';
                 headers = `
@@ -1211,13 +1380,13 @@
                 headers = `
                     <th onclick="sortPanel('${panel.id}', 'rank')">#</th>
                     <th onclick="sortPanel('${panel.id}', 'symbol')">Symbol</th>
+                    <th onclick="sortPanel('${panel.id}', 'sector')">Sector</th>
+                    <th onclick="sortPanel('${panel.id}', 'heat_score')">Heat</th>
+                    <th onclick="sortPanel('${panel.id}', 'cluster_role')">Role</th>
                     <th onclick="sortPanel('${panel.id}', 'last_price')">Price</th>
                     <th onclick="sortPanel('${panel.id}', 'change_pct')">Chg %</th>
                     <th onclick="sortPanel('${panel.id}', 'volume')">Volume</th>
-                    <th onclick="sortPanel('${panel.id}', 'float_shares')">Float</th>
                     <th onclick="sortPanel('${panel.id}', 'rvol')">RVOL</th>
-                    <th onclick="sortPanel('${panel.id}', 'velocity')">Vel</th>
-                    <th onclick="sortPanel('${panel.id}', 'high')">HOD</th>
                     <th onclick="sortPanel('${panel.id}', 'ai_score')">AI</th>
                 `;
             }
@@ -1258,6 +1427,7 @@
                     <div class="filters-bar">
                         ${createFiltersBarHTML(panel)}
                     </div>
+                    <div class="chain-banner" id="chain-banner-${panel.id}"></div>
                     <div class="panel-content">
                         <table class="scanner-table">
                             <thead>
@@ -1340,7 +1510,21 @@
             try {
                 let fetchedRows = [];
 
-                if (panel.source === 'news') {
+                if (panel.source === 'heatmap') {
+                    // Fetch from sector heatmap endpoint
+                    try {
+                        const res = await fetch(`${API_BASE}/sector/heatmap`);
+                        const data = await res.json();
+                        renderHeatmapPanel(panelId, data);
+                        const count = data.sectors ? Object.keys(data.sectors).length : 0;
+                        document.getElementById(`count-${panelId}`).textContent = count;
+                    } catch (err) {
+                        const grid = document.getElementById(`heatmap-${panelId}`);
+                        if (grid) grid.innerHTML = '<div class="empty-state">Heatmap unavailable</div>';
+                    }
+                    setStatus(true);
+                    return;
+                } else if (panel.source === 'news') {
                     // Fetch from News endpoint
                     const res = await fetch(`${API_BASE}/news/recent?limit=50`);
                     const data = await res.json();
@@ -1436,6 +1620,11 @@
                 // NO LIMIT - show ALL stocks in sticky list
                 // They earned their spot, they stay until cleared
 
+                // Apply chain grouping for scanner panels
+                if (panel.source === 'scanner') {
+                    rows = applyChainGrouping(rows, panelId);
+                }
+
                 // Render ALL stocks
                 renderPanelTable(panelId, rows, panel.source);
                 document.getElementById(`count-${panelId}`).textContent = sticky.size;
@@ -1490,8 +1679,15 @@
         // Sort rows
         function sortRows(rows, sortBy, sortDir) {
             return [...rows].sort((a, b) => {
-                const aVal = a[sortBy] || 0;
-                const bVal = b[sortBy] || 0;
+                let aVal = a[sortBy] ?? '';
+                let bVal = b[sortBy] ?? '';
+                // String comparison for text fields
+                if (typeof aVal === 'string' && typeof bVal === 'string') {
+                    const cmp = aVal.localeCompare(bVal);
+                    return sortDir === 'asc' ? cmp : -cmp;
+                }
+                aVal = aVal || 0;
+                bVal = bVal || 0;
                 return sortDir === 'asc' ? aVal - bVal : bVal - aVal;
             });
         }
@@ -1625,33 +1821,130 @@
         function updateScannerRow(tr, row, index, priceChanged) {
             const isAtHOD = row.hod_proximity >= 0.98;
             const isNearHOD = row.hod_proximity >= 0.95 && row.hod_proximity < 0.98;
-            const floatShares = row.float_shares || 0;
-            const isLowFloat = floatShares > 0 && floatShares < 20;
             const isStale = row._stale;
+            const clusterRole = row.cluster_role || 'none';
+            const isChainMember = clusterRole === 'leader' || clusterRole === 'sympathy';
 
             let classes = [];
             if (isAtHOD) classes.push('at-hod');
             else if (isNearHOD) classes.push('near-hod');
             if (isStale) classes.push('stale');
+            if (isChainMember) classes.push('chain-member');
+            if (row._chainStart) classes.push('chain-start');
             tr.className = classes.join(' ');
+
+            // Sector & heat
+            const sector = row.sector || 'unknown';
+            const heat = (row.heat || 'COLD').toLowerCase();
+            const heatLabel = row.heat || 'COLD';
+
+            // Role display
+            let roleHTML = '';
+            if (clusterRole === 'leader') {
+                roleHTML = '<span class="cell-role leader" title="Chain Leader">&#9733; LDR</span>';
+            } else if (clusterRole === 'sympathy') {
+                roleHTML = '<span class="cell-role sympathy" title="Sympathy Play">&#8594; SYM</span>';
+            } else {
+                roleHTML = '<span style="color:var(--text-secondary)">-</span>';
+            }
 
             tr.innerHTML = `
                 <td>${index + 1}</td>
                 <td class="cell-symbol" onclick="showSymbolDetails('${row.symbol}')">${row.symbol}</td>
+                <td class="cell-sector" title="${sector}">${sector === 'unknown' ? '-' : sector}</td>
+                <td class="cell-heat ${heat}"><span class="heat-dot ${heat}"></span>${heatLabel}</td>
+                <td>${roleHTML}</td>
                 <td class="cell-price">$${row.last_price.toFixed(2)}</td>
                 <td class="${row.change_pct >= 0 ? 'cell-positive' : 'cell-negative'}">
                     ${row.change_pct >= 0 ? '+' : ''}${row.change_pct.toFixed(2)}%
                 </td>
                 <td>${formatVolume(row.volume)}</td>
-                <td class="${isLowFloat ? 'cell-positive' : ''}">${formatFloat(floatShares)}</td>
                 <td>${(row.rvol || 0).toFixed(1)}x</td>
-                <td>${(row.velocity || 0).toFixed(2)}</td>
-                <td class="cell-hod ${isAtHOD ? 'hod-hit' : ''}">
-                    $${(row.high || 0).toFixed(2)}
-                    ${isAtHOD ? '<span class="hod-badge">HOD!</span>' : ''}
-                </td>
                 <td><span class="cell-score ${getScoreClass(row.ai_score || 0)}">${(row.ai_score || 0).toFixed(2)}</span></td>
             `;
+        }
+
+        // Render sector heatmap panel
+        function renderHeatmapPanel(panelId, data) {
+            const grid = document.getElementById(`heatmap-${panelId}`);
+            if (!grid) return;
+
+            const sectors = data.sectors || data;
+            const entries = Object.entries(sectors);
+
+            if (entries.length === 0) {
+                grid.innerHTML = '<div class="empty-state">No sector data available</div>';
+                return;
+            }
+
+            // Sort by heat_score descending
+            entries.sort((a, b) => {
+                const aScore = typeof a[1] === 'object' ? (a[1].heat_score || 0) : a[1];
+                const bScore = typeof b[1] === 'object' ? (b[1].heat_score || 0) : b[1];
+                return bScore - aScore;
+            });
+
+            grid.innerHTML = entries.map(([sector, info]) => {
+                const score = typeof info === 'object' ? (info.heat_score || 0) : info;
+                const heat = score >= 0.70 ? 'hot' : score >= 0.50 ? 'warm' : score >= 0.30 ? 'cool' : 'cold';
+                const label = heat.toUpperCase();
+                return `
+                    <div class="heatmap-tile ${heat}">
+                        <div class="heatmap-sector-name">${sector}</div>
+                        <div class="heatmap-score ${heat}">${(score * 100).toFixed(0)}%</div>
+                        <div class="heatmap-label cell-heat ${heat}">${label}</div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // Apply chain grouping to sorted rows — marks chain boundaries
+        function applyChainGrouping(rows, panelId) {
+            // Find chain members and group them
+            const chainMembers = rows.filter(r => r.cluster_role === 'leader' || r.cluster_role === 'sympathy');
+            if (chainMembers.length === 0) {
+                // Hide chain banner
+                const banner = document.getElementById(`chain-banner-${panelId}`);
+                if (banner) banner.classList.remove('active');
+                return rows;
+            }
+
+            // Group by sector
+            const chainSectors = {};
+            chainMembers.forEach(r => {
+                const sec = r.sector || 'unknown';
+                if (!chainSectors[sec]) chainSectors[sec] = { leaders: [], sympathy: [] };
+                if (r.cluster_role === 'leader') chainSectors[sec].leaders.push(r.symbol);
+                else chainSectors[sec].sympathy.push(r.symbol);
+            });
+
+            // Show chain banner
+            const banner = document.getElementById(`chain-banner-${panelId}`);
+            if (banner) {
+                const chainDescs = Object.entries(chainSectors)
+                    .filter(([, v]) => v.leaders.length > 0)
+                    .map(([sec, v]) => `${sec.toUpperCase()}: ${v.leaders.join(',')} + ${v.sympathy.length} sympathy`);
+                if (chainDescs.length > 0) {
+                    banner.innerHTML = `&#9734; CHAINS: ${chainDescs.join(' | ')}`;
+                    banner.classList.add('active');
+                } else {
+                    banner.classList.remove('active');
+                }
+            }
+
+            // Mark first chain member per sector for border
+            const seenSectors = new Set();
+            rows.forEach(r => {
+                if (r.cluster_role === 'leader' || r.cluster_role === 'sympathy') {
+                    const sec = r.sector || 'unknown';
+                    if (!seenSectors.has(sec)) {
+                        r._chainStart = true;
+                        seenSectors.add(sec);
+                    }
+                }
+            });
+
+            return rows;
         }
 
         // Render halts table
